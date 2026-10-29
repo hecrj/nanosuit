@@ -2186,6 +2186,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanosuit"
+version = "0.1.0-dev"
+dependencies = [
+ "function",
+ "iced",
+ "iced_palace",
+ "log",
+ "nanosuit-core",
+ "nanosuit-test",
+ "reason",
+ "serde",
+ "serde_json",
+ "similar",
+ "sipper",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "nanosuit-core"
+version = "0.1.0-dev"
+dependencies = [
+ "decoder",
+ "dirs",
+ "jiff",
+ "nanosuit-test",
+ "reason",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "nanosuit-test"
+version = "0.1.0-dev"
+
+[[package]]
 name = "native-tls"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2681,42 +2717,6 @@ name = "pin-utils"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13bee6c73da26345c729282832b60b0363cf3dd9f4bfd81d8551b7a1c889a113"
-
-[[package]]
-name = "piolet"
-version = "0.1.0-dev"
-dependencies = [
- "function",
- "iced",
- "iced_palace",
- "log",
- "piolet-core",
- "piolet-test",
- "reason",
- "serde",
- "serde_json",
- "similar",
- "sipper",
- "tokio",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "piolet-core"
-version = "0.1.0-dev"
-dependencies = [
- "decoder",
- "dirs",
- "jiff",
- "piolet-test",
- "reason",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "piolet-test"
-version = "0.1.0-dev"
 
 [[package]]
 name = "piper"

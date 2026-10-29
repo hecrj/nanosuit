@@ -32,7 +32,7 @@ impl Project {
     pub fn data_dir(&self) -> PathBuf {
         dirs::data_dir()
             .unwrap_or_default()
-            .join("piolet")
+            .join("nanosuit")
             .join(&self.id)
     }
 
@@ -130,15 +130,18 @@ mod tests {
     #[test]
     fn the_id_is_deterministic_and_named_after_the_project() {
         // Deterministic: the same project names the same id...
-        assert_eq!(id("/home/user/code/piolet"), id("/home/user/code/piolet"));
+        assert_eq!(
+            id("/home/user/code/nanosuit"),
+            id("/home/user/code/nanosuit")
+        );
 
         // ...named after the project and a hash of its path...
-        let name = id("/home/user/code/piolet");
-        assert!(name.0.starts_with("piolet-"), "{name}");
-        assert_eq!(name.0.len(), "piolet-".len() + 8);
+        let name = id("/home/user/code/nanosuit");
+        assert!(name.0.starts_with("nanosuit-"), "{name}");
+        assert_eq!(name.0.len(), "nanosuit-".len() + 8);
 
         // ...and a different project names a different id.
-        assert_ne!(id("/home/user/code/piolet"), id("/home/user/code/other"));
+        assert_ne!(id("/home/user/code/nanosuit"), id("/home/user/code/other"));
     }
 
     #[test]
@@ -149,7 +152,7 @@ mod tests {
             use std::ffi::OsStr;
             use std::os::unix::ffi::OsStrExt;
 
-            Path::new(OsStr::from_bytes(b"/home/user/code/piolet-\xff")).to_path_buf()
+            Path::new(OsStr::from_bytes(b"/home/user/code/nanosuit-\xff")).to_path_buf()
         };
 
         #[cfg(windows)]
@@ -173,7 +176,7 @@ mod tests {
         // Golden vector: the id is on-disk state that survives
         // launches, so the naming scheme is frozen — a change
         // would rename every leaf and orphan the scratch it held.
-        assert_eq!(id("/home/user/code/piolet").0, "piolet-5d0d7f7d");
+        assert_eq!(id("/home/user/code/nanosuit").0, "nanosuit-1d45fac8");
     }
 
     fn project(path: &str, home: Option<&str>) -> Project {
@@ -184,11 +187,11 @@ mod tests {
     /// shown relative to it.
     #[test]
     fn a_path_inside_the_project_is_shown_relative_to_it() {
-        let project = project("/home/user/code/piolet", Some("/home/user"));
+        let project = project("/home/user/code/nanosuit", Some("/home/user"));
 
-        assert_eq!(project.relative("/home/user/code/piolet"), Path::new("."));
+        assert_eq!(project.relative("/home/user/code/nanosuit"), Path::new("."));
         assert_eq!(
-            project.relative("/home/user/code/piolet/src/main.rs"),
+            project.relative("/home/user/code/nanosuit/src/main.rs"),
             Path::new("src/main.rs")
         );
     }
@@ -197,11 +200,11 @@ mod tests {
     /// a different directory, so it is not shown relative to it.
     #[test]
     fn a_sibling_with_a_shared_string_prefix_is_not_relative() {
-        let project = project("/home/user/code/piolet", Some("/home/user"));
+        let project = project("/home/user/code/nanosuit", Some("/home/user"));
 
         assert_eq!(
-            project.relative("/home/user/code/pioletter/main.rs"),
-            Path::new("~/code/pioletter/main.rs")
+            project.relative("/home/user/code/nanosuitter/main.rs"),
+            Path::new("~/code/nanosuitter/main.rs")
         );
     }
 
@@ -209,7 +212,7 @@ mod tests {
     /// shown with a tilde, including the home directory itself.
     #[test]
     fn a_path_outside_the_project_is_shown_with_a_tilde() {
-        let project = project("/home/user/code/piolet", Some("/home/user"));
+        let project = project("/home/user/code/nanosuit", Some("/home/user"));
 
         assert_eq!(project.relative("/home/user"), Path::new("~"));
         assert_eq!(
@@ -222,7 +225,7 @@ mod tests {
     /// shown as is.
     #[test]
     fn a_path_outside_the_project_and_home_is_shown_as_is() {
-        let project = project("/home/user/code/piolet", Some("/home/user"));
+        let project = project("/home/user/code/nanosuit", Some("/home/user"));
 
         assert_eq!(project.relative("/etc/hosts"), Path::new("/etc/hosts"));
     }
@@ -231,7 +234,7 @@ mod tests {
     /// so a path outside the project is shown as is.
     #[test]
     fn a_path_outside_the_project_is_shown_as_is_without_a_home() {
-        let project = project("/home/user/code/piolet", None);
+        let project = project("/home/user/code/nanosuit", None);
 
         assert_eq!(
             project.relative("/home/user/docs/notes.md"),
@@ -247,16 +250,16 @@ mod tests {
         // the platform's own; on Windows a `join` produces `\`.
         #[cfg(unix)]
         {
-            let project = project("/home/user/code/piolet", Some("/home/user"));
+            let project = project("/home/user/code/nanosuit", Some("/home/user"));
 
-            assert_eq!(project.to_string(), "~/code/piolet");
+            assert_eq!(project.to_string(), "~/code/nanosuit");
         }
 
         #[cfg(windows)]
         {
-            let project = project(r"C:\home\user\code\piolet", Some(r"C:\home\user"));
+            let project = project(r"C:\home\user\code\nanosuit", Some(r"C:\home\user"));
 
-            assert_eq!(project.to_string(), r"~\code\piolet");
+            assert_eq!(project.to_string(), r"~\code\nanosuit");
         }
     }
 }

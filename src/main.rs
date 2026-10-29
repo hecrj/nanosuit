@@ -1,4 +1,4 @@
-use piolet_core as core;
+use nanosuit_core as core;
 
 mod diff;
 mod font;
@@ -101,27 +101,29 @@ fn main() -> Result<(), iced::Error> {
     };
 
     let server = reason::Settings {
-        url: env::var("PIOLET_SERVER_URL")
+        url: env::var("NANOSUIT_SERVER_URL")
             .as_deref()
             .unwrap_or("http://127.0.0.1:9931")
             .parse()
             .expect("server url must be valid"),
-        api_key: env::var("PIOLET_SERVER_API_KEY").ok().map(reason::Key::new),
+        api_key: env::var("NANOSUIT_SERVER_API_KEY")
+            .ok()
+            .map(reason::Key::new),
     };
 
     iced::application(
-        move || Piolet::new(&project, prompt.as_deref(), &session, &server),
-        Piolet::update,
-        Piolet::view,
+        move || Nanosuit::new(&project, prompt.as_deref(), &session, &server),
+        Nanosuit::update,
+        Nanosuit::view,
     )
-    .title("piolet")
-    .subscription(Piolet::subscription)
+    .title("nanosuit")
+    .subscription(Nanosuit::subscription)
     .theme(Theme::CatppuccinMocha)
     .font(Font::MONOSPACE)
     .run()
 }
 
-struct Piolet {
+struct Nanosuit {
     project: Project,
     session: session::File,
     repository: Repository,
@@ -180,7 +182,7 @@ enum Message {
     ToggleCompact(bool),
 }
 
-impl Piolet {
+impl Nanosuit {
     fn new(
         project: &Project,
         prompt: Option<&str>,
@@ -189,7 +191,7 @@ impl Piolet {
     ) -> (Self, Task<Message>) {
         let (repository, load_repository) = repository::Repository::new(project.clone());
 
-        let mut piolet = Self {
+        let mut nanosuit = Self {
             project: project.clone(),
             session: session.clone(),
             repository,
@@ -212,11 +214,11 @@ impl Piolet {
         let boot = {
             let load = Task::perform(Session::load(session), Message::SessionLoaded);
 
-            Task::batch([piolet.connect(), load])
+            Task::batch([nanosuit.connect(), load])
         };
 
         (
-            piolet,
+            nanosuit,
             Task::batch([
                 if prompt.is_some() {
                     boot.chain(Task::done(Message::Send))
@@ -1034,7 +1036,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                         .text_size(font::SMALL)
                         .on_toggle(Message::ToggleCompact),
                     rule::horizontal(1).style(rule::weak),
-                    text!("piolet {}", env!("CARGO_PKG_VERSION"))
+                    text!("nanosuit {}", env!("CARGO_PKG_VERSION"))
                         .size(font::TINY)
                         .style(text::secondary)
                 ]

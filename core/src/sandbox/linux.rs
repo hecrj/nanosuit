@@ -8,19 +8,19 @@
 //! - the user, pid, ipc, and uts namespaces are unshared, so the
 //!   sandboxed process has no host identity and cannot see or signal
 //!   host processes;
-//! - the root filesystem is bound read-only, with the project, the
-//!   user's projects directory, and the scratchpad as the writable
-//!   places besides the ssh-agent socket; the scratchpad is a
-//!   dedicated leaf under the host's temp directory — `TMPDIR` if
-//!   set, else `/tmp` — mounted at `/tmp`, so the system reaps it:
-//!   tmpfiles ages out idle leaves where it manages the directory,
-//!   and a reboot clears them on a tmpfs, instead of nanosuit having to
-//!   clean it up;
+//! - the root filesystem is bound read-only, with the project and
+//!   the scratchpad as the writable places besides the ssh-agent
+//!   socket and whatever the sandbox configuration's `write` list
+//!   allows; the scratchpad is a dedicated leaf under the host's
+//!   temp directory — `TMPDIR` if set, else `/tmp` — mounted at
+//!   `/tmp`, so the system reaps it: tmpfiles ages out idle leaves
+//!   where it manages the directory, and a reboot clears them on a
+//!   tmpfs, instead of nanosuit having to clean it up;
 //! - the home directory is replaced by a tmpfs, hiding credentials
-//!   and configuration, with only the Rust toolchain remounted;
-//! - the user's projects directory is bound read-write, so the
-//!   model can work across sibling projects, not just the one it
-//!   was launched in;
+//!   and configuration, with the project's data directory and the
+//!   configuration file itself remounted, and the paths the sandbox
+//!   configuration's `read` and `write` lists name coming back
+//!   read-only or writable as configured;
 //! - the GPU's device nodes are remounted on the minimal `/dev`,
 //!   and the X11 socket directory is bound into the private `/tmp`,
 //!   so the renderer can use the hardware instead of the CPU;
@@ -41,11 +41,15 @@
 //!   to reach the compositor, the host's locale variables —
 //!   `LC_ALL`, any `LC_*`, `LANG`, or `LC_ALL=C.UTF-8` where the
 //!   host set none — so gpg and git render accented names instead
-//!   of mangling them under the bare C locale, and nanosuit's own
+//!   of mangling them under the bare C locale, nanosuit's own
 //!   `NANOSUIT_*` configuration variables, like `NANOSUIT_SERVER_URL`,
-//!   while tokens the user exported never reach the model's shell.
-use crate::Project;
+//!   and the variables the sandbox configuration's `env` list names,
+//!   whose values are taken from the host — while tokens the user
+//!   exported never reach the model's shell.
+use crate::config;
+use crate::environment;
 use crate::sandbox::{Error, MARKER, MARKER_VALUE};
+use crate::{Config, Project};
 
 use std::env;
 use std::ffi::OsString;
@@ -58,7 +62,7 @@ const HOSTNAME: &str = "nanosuit";
 /// The bubblewrap binary, looked up on the `PATH`.
 const BINARY: &str = "bwrap";
 
-pub fn enter(project: &Project) -> Result<(), Error> {
+pub fn enter(config: &config::Sandbox, project: &Project) -> Result<(), Error> {
     let bwrap = match find_on_path(BINARY, env::var_os("PATH").as_deref()) {
         Some(bwrap) => bwrap,
         None => return Err(Error::Missing),
@@ -88,7 +92,7 @@ pub fn enter(project: &Project) -> Result<(), Error> {
         Err(error) => return Err(Error::Exec(error.to_string())),
     };
 
-    let mut args = bwrap_args(project, env::home_dir().as_deref(), &exe);
+    let mut args = bwrap_args(config, project, env::home_dir().as_deref(), &exe);
 
     // Forward the original arguments, like the initial prompt.
     args.extend(env::args_os().skip(1));
@@ -203,14 +207,20 @@ fn prepare_scratch(leaf: &Path) -> Result<(), String> {
     })
 }
 
-/// The bubblewrap arguments that sandbox a re-execution of `exe`
-/// with `project`, the project's data directory, the user's
-/// projects directory, and the scratchpad at `/tmp` as the only
-/// writable directories.
+/// The bubblewrap arguments that sandbox a re-execution of `exe`,
+/// with the project, the project's data directory, and the
+/// scratchpad at `/tmp` — beside whatever the sandbox
+/// configuration's `write` list allows — as the writable
+/// directories.
 ///
 /// Bubblewrap applies the mounts in the order given, so the
 /// read-only root comes first and the exceptions follow.
-fn bwrap_args(project: &Project, home: Option<&Path>, exe: &Path) -> Vec<OsString> {
+fn bwrap_args(
+    config: &config::Sandbox,
+    project: &Project,
+    home: Option<&Path>,
+    exe: &Path,
+) -> Vec<OsString> {
     fn os(path: impl AsRef<Path>) -> OsString {
         path.as_ref().as_os_str().to_os_string()
     }
@@ -243,35 +253,6 @@ fn bwrap_args(project: &Project, home: Option<&Path>, exe: &Path) -> Vec<OsStrin
         // visible, and remount only what building needs.
         args.extend([OsString::from("--tmpfs"), os(home)]);
 
-        // Cargo needs a writable registry, so `~/.cargo` comes back
-        // writable; `~/.rustup` is never written to by a build, so
-        // it stays read-only.
-        let cargo_home = home.join(".cargo");
-        if cargo_home.is_dir() {
-            args.extend([OsString::from("--bind"), os(&cargo_home), os(&cargo_home)]);
-        }
-
-        let rustup_home = home.join(".rustup");
-        if rustup_home.is_dir() {
-            args.extend([
-                OsString::from("--ro-bind"),
-                os(&rustup_home),
-                os(&rustup_home),
-            ]);
-        }
-
-        // The user's projects directory, writable, so the model
-        // can work across sibling projects, not just the one it
-        // was launched in.
-        let projects_home = home.join("projects");
-        if projects_home.is_dir() {
-            args.extend([
-                OsString::from("--bind"),
-                os(&projects_home),
-                os(&projects_home),
-            ]);
-        }
-
         // The project's data directory, writable, so the sessions
         // it holds outlive the sandbox: home is a tmpfs, so without
         // the bind an append would create the directory there and
@@ -282,8 +263,31 @@ fn bwrap_args(project: &Project, home: Option<&Path>, exe: &Path) -> Vec<OsStrin
         // environment forwards `HOME` but not `XDG_DATA_HOME` —
         // looks under `$HOME/.local/share`.
         let data_dir = project.data_dir();
-        let sandbox_dir = home.join(".local/share").join("nanosuit").join(&project.id);
-        args.extend([OsString::from("--bind"), os(&data_dir), os(&sandbox_dir)]);
+        let sandbox_data_dir = home
+            .join(".local/share")
+            .join(environment::NAME)
+            .join(&project.id);
+
+        args.extend([
+            OsString::from("--bind"),
+            os(&data_dir),
+            os(&sandbox_data_dir),
+        ]);
+
+        let config_file = Config::file();
+        let sandbox_config_file = home.join(".config").join(environment::NAME).join(
+            config_file
+                .file_name()
+                .expect("config file must have a file name"),
+        );
+
+        if config_file.is_file() {
+            args.extend([
+                OsString::from("--ro-bind"),
+                os(&config_file),
+                os(&sandbox_config_file),
+            ]);
+        }
 
         // Keep the executable reachable if it lives under the hidden
         // home and outside the project, like `~/.local/bin/nanosuit`.
@@ -405,6 +409,48 @@ fn bwrap_args(project: &Project, home: Option<&Path>, exe: &Path) -> Vec<OsStrin
     // writable place of the sandbox.
     args.extend([OsString::from("--bind"), os(project), os(project)]);
 
+    let canonicalize = |path: &PathBuf| {
+        if path == "~" {
+            return None;
+        }
+
+        if path.is_relative() {
+            return Some(home?.join(path.strip_prefix("~/").unwrap_or(path)));
+        }
+
+        Some(path.to_path_buf())
+    };
+
+    let parse = |path: &PathBuf| {
+        let Some(path) = canonicalize(path) else {
+            log::warn!("path failed to canonicalize: {}", path.display());
+            return None;
+        };
+
+        if !path.exists() {
+            log::warn!("path does not exist: {}", path.display());
+            return None;
+        }
+
+        Some(path)
+    };
+
+    args.extend(
+        config
+            .read
+            .iter()
+            .filter_map(parse)
+            .flat_map(|path| [OsString::from("--ro-bind"), os(&path), os(&path)]),
+    );
+
+    args.extend(
+        config
+            .write
+            .iter()
+            .filter_map(parse)
+            .flat_map(|path| [OsString::from("--bind"), os(&path), os(&path)]),
+    );
+
     // A minimal `/dev` and a `/proc` that only knows the sandbox's
     // own pid namespace.
     args.extend([
@@ -493,6 +539,20 @@ fn bwrap_args(project: &Project, home: Option<&Path>, exe: &Path) -> Vec<OsStrin
     for (name, value) in locale_vars(&host_env) {
         args.extend([OsString::from("--setenv"), name, value]);
     }
+
+    args.extend(
+        config
+            .env
+            .iter()
+            .filter_map(|var| {
+                Some([
+                    OsString::from("--setenv"),
+                    OsString::from(var),
+                    env::var_os(var)?,
+                ])
+            })
+            .flatten(),
+    );
 
     args.push(OsString::from("--"));
     args.push(os(exe));
@@ -716,15 +776,20 @@ mod tests {
 
     #[test]
     fn the_root_is_read_only_and_the_project_writable() {
-        // A temp home without a `projects` directory: the exact
-        // writability assertion must not depend on the machine it
-        // runs on.
+        // The default configuration names no paths, and a temp home
+        // holds none of them: the exact writability assertion must
+        // not depend on the machine it runs on.
         let root = std::env::temp_dir()
             .join(format!("nanosuit-sandbox-root-{}", std::process::id()))
             .join("home");
         std::fs::create_dir_all(&root).unwrap();
 
-        let args = rendered(&bwrap_args(&project(), Some(&root), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&root),
+            &exe(),
+        ));
 
         assert!(
             args.windows(3)
@@ -875,7 +940,12 @@ mod tests {
 
     #[test]
     fn the_home_is_hidden_by_a_tmpfs() {
-        let args = rendered(&bwrap_args(&project(), Some(&home()), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&home()),
+            &exe(),
+        ));
 
         assert!(
             args.windows(2)
@@ -884,57 +954,86 @@ mod tests {
     }
 
     #[test]
-    fn the_toolchain_is_remounted_when_present() {
+    fn the_configured_write_paths_come_back_writable() {
+        // The toolchain is no longer a default: it comes back
+        // writable only when the configuration's `write` list names
+        // it. A temp home, so the assertion does not depend on the
+        // machine it runs on.
         let root = std::env::temp_dir()
-            .join(format!("nanosuit-sandbox-test-{}", std::process::id()))
+            .join(format!("nanosuit-sandbox-write-{}", std::process::id()))
             .join("home");
         std::fs::create_dir_all(root.join(".cargo")).unwrap();
 
-        let args = rendered(&bwrap_args(&project(), Some(&root), &exe()));
+        let config = config::Sandbox {
+            write: vec![root.join(".cargo")],
+            ..Default::default()
+        };
+
+        let args = rendered(&bwrap_args(&config, &project(), Some(&root), &exe()));
 
         let cargo_home = root.join(".cargo").to_string_lossy().into_owned();
         assert!(
             args.windows(3)
-                .any(|window| { window[0] == "--bind" && window[1] == cargo_home })
+                .any(|window| { window == ["--bind", cargo_home.as_str(), cargo_home.as_str()] })
         );
 
-        // No `~/.rustup` was created, so nothing is remounted for it.
+        // No `~/.rustup` is named, so nothing is remounted for it.
         assert!(!args.iter().any(|arg| arg.ends_with(".rustup")));
     }
 
     #[test]
-    fn the_projects_directory_is_bound_writable_when_present() {
+    fn the_configured_read_paths_come_back_read_only() {
+        // A relative entry resolves against the home directory, and
+        // a `~/` prefix expands to it; a temp home, so the
+        // assertion does not depend on the machine it runs on.
         let root = std::env::temp_dir()
-            .join(format!("nanosuit-sandbox-projects-{}", std::process::id()))
+            .join(format!("nanosuit-sandbox-read-{}", std::process::id()))
             .join("home");
         std::fs::create_dir_all(root.join("projects")).unwrap();
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
 
-        let args = rendered(&bwrap_args(&project(), Some(&root), &exe()));
+        let config = config::Sandbox {
+            read: vec![PathBuf::from("~/projects"), PathBuf::from(".ssh")],
+            ..Default::default()
+        };
+
+        let args = rendered(&bwrap_args(&config, &project(), Some(&root), &exe()));
 
         let projects = root.join("projects").to_string_lossy().into_owned();
         assert!(
             args.windows(3)
-                .any(|window| { window == ["--bind", projects.as_str(), projects.as_str()] })
+                .any(|window| { window == ["--ro-bind", projects.as_str(), projects.as_str()] })
+        );
+
+        let ssh = root.join(".ssh").to_string_lossy().into_owned();
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--ro-bind", ssh.as_str(), ssh.as_str()] })
         );
     }
 
     #[test]
-    fn the_projects_directory_is_not_bound_when_absent() {
+    fn a_configured_path_that_is_missing_is_skipped() {
         let root = std::env::temp_dir()
-            .join(format!(
-                "nanosuit-sandbox-projects-none-{}",
-                std::process::id()
-            ))
+            .join(format!("nanosuit-sandbox-missing-{}", std::process::id()))
             .join("home");
         std::fs::create_dir_all(&root).unwrap();
 
-        let args = rendered(&bwrap_args(&project(), Some(&root), &exe()));
+        // Named in the configuration but not on the host: skipping
+        // it is the policy, so one machine's missing toolchain does
+        // not break another's start.
+        let config = config::Sandbox {
+            write: vec![root.join("projects")],
+            ..Default::default()
+        };
+
+        let args = rendered(&bwrap_args(&config, &project(), Some(&root), &exe()));
 
         assert!(!args.iter().any(|arg| arg.ends_with("/projects")));
     }
 
     #[test]
-    fn a_live_sandbox_mounts_the_projects_directory_and_sessions_writable() {
+    fn a_live_sandbox_mounts_the_configured_projects_directory_and_sessions_writable() {
         // Skipped where `bwrap` is unavailable, like the display
         // tests, and where the nested user namespace it needs
         // cannot be created, so the probe runs first.
@@ -979,7 +1078,14 @@ mod tests {
         prepare_scratch(&scratch_leaf(&project)).expect("scratch leaf");
         let _data_dir = Directory::create(project.data_dir()).expect("data dir");
 
-        let mut args = bwrap_args(&project, Some(&root), &exe());
+        // The projects directory comes back only because the
+        // configuration names it.
+        let config = config::Sandbox {
+            write: vec![root.join("projects")],
+            ..Default::default()
+        };
+
+        let mut args = bwrap_args(&config, &project, Some(&root), &exe());
         args.truncate(args.len() - 2); // Drop the `--` and the executable.
         let sandbox_data_dir = root.join(".local/share").join("nanosuit").join(&project.id);
         let probe = format!(
@@ -1029,6 +1135,7 @@ mod tests {
     #[test]
     fn an_executable_under_the_home_stays_reachable() {
         let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
             &project(),
             Some(&home()),
             &home().join(".local/bin/nanosuit"),
@@ -1043,6 +1150,7 @@ mod tests {
     #[test]
     fn an_executable_under_the_project_needs_no_extra_bind() {
         let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
             &project(),
             Some(&home()),
             &project().join("target/debug/nanosuit"),
@@ -1055,7 +1163,12 @@ mod tests {
 
     #[test]
     fn the_reexecution_ends_with_the_executable() {
-        let args = rendered(&bwrap_args(&project(), Some(&home()), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&home()),
+            &exe(),
+        ));
 
         let (penultimate, last) = (&args[args.len() - 2], &args[args.len() - 1]);
         assert_eq!(penultimate, "--");
@@ -1064,7 +1177,12 @@ mod tests {
 
     #[test]
     fn the_environment_is_cleared_down_to_the_basics() {
-        let args = rendered(&bwrap_args(&project(), Some(&home()), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&home()),
+            &exe(),
+        ));
 
         assert!(args.contains(&"--clearenv".to_owned()));
 
@@ -1095,7 +1213,12 @@ mod tests {
             return;
         }
 
-        let args = rendered(&bwrap_args(&project(), Some(&home()), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&home()),
+            &exe(),
+        ));
 
         assert!(
             args.windows(3)
@@ -1193,7 +1316,12 @@ mod tests {
             return;
         }
 
-        let args = rendered(&bwrap_args(&project(), Some(&home()), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&home()),
+            &exe(),
+        ));
 
         assert!(
             args.windows(3)
@@ -1203,7 +1331,12 @@ mod tests {
 
     #[test]
     fn the_x_authority_file_is_bound_when_present() {
-        let args = rendered(&bwrap_args(&project(), Some(&home()), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&home()),
+            &exe(),
+        ));
 
         // The file may not exist, and `XAUTHORITY` may point at a
         // missing file, in which case nothing is bound.
@@ -1231,7 +1364,12 @@ mod tests {
         )
         .unwrap();
 
-        let args = rendered(&bwrap_args(&project(), Some(&root), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&root),
+            &exe(),
+        ));
 
         let known_hosts = root
             .join(".ssh")
@@ -1254,7 +1392,12 @@ mod tests {
             .join("home");
         std::fs::create_dir_all(&root).unwrap();
 
-        let args = rendered(&bwrap_args(&project(), Some(&root), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&root),
+            &exe(),
+        ));
 
         // No `known_hosts` in this home, so nothing is bound for it.
         assert!(!args.iter().any(|arg| arg.contains("known_hosts")));
@@ -1269,7 +1412,12 @@ mod tests {
             None => return,
         };
 
-        let args = rendered(&bwrap_args(&project(), Some(&home()), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&home()),
+            &exe(),
+        ));
 
         let sock = socket.to_string_lossy().into_owned();
         assert!(
@@ -1312,7 +1460,12 @@ mod tests {
         )
         .unwrap();
 
-        let args = rendered(&bwrap_args(&project(), Some(&home), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&home),
+            &exe(),
+        ));
 
         for file in [&pub_key, &signers] {
             let path = file.to_string_lossy().into_owned();
@@ -1344,7 +1497,12 @@ mod tests {
         )
         .unwrap();
 
-        let args = rendered(&bwrap_args(&project(), Some(&home), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&home),
+            &exe(),
+        ));
 
         for file in [&pub_key, &signers] {
             let path = file.to_string_lossy().into_owned();
@@ -1374,7 +1532,12 @@ mod tests {
         )
         .unwrap();
 
-        let args = rendered(&bwrap_args(&project(), Some(&root), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&root),
+            &exe(),
+        ));
 
         assert!(!args.iter().any(|arg| arg.contains("1B8B3BF1")));
         assert!(!args.iter().any(|arg| arg.contains("signers")));
@@ -1390,7 +1553,12 @@ mod tests {
             .join("home");
         std::fs::create_dir_all(&root).unwrap();
 
-        let args = rendered(&bwrap_args(&project(), Some(&root), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&root),
+            &exe(),
+        ));
 
         assert!(!args.iter().any(|arg| arg.contains("id_ed25519.pub")));
     }
@@ -1409,7 +1577,12 @@ mod tests {
             _ => return,
         };
 
-        let args = rendered(&bwrap_args(&project(), Some(&home()), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&home()),
+            &exe(),
+        ));
 
         let dir = dir.to_string_lossy().into_owned();
         let blank = args
@@ -1492,7 +1665,12 @@ mod tests {
         let host_env: Vec<(OsString, OsString)> = env::vars_os().collect();
         let expected = locale_vars(&host_env);
 
-        let args = rendered(&bwrap_args(&project(), Some(&home()), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&home()),
+            &exe(),
+        ));
 
         for (name, value) in &expected {
             let name = name.to_string_lossy().into_owned();
@@ -1547,7 +1725,12 @@ mod tests {
             env::set_var("NANOSUIT_TEST_FORWARD", "forwarded");
         }
 
-        let args = rendered(&bwrap_args(&project(), Some(&home()), &exe()));
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&home()),
+            &exe(),
+        ));
 
         unsafe {
             env::remove_var("NANOSUIT_TEST_FORWARD");
@@ -1557,5 +1740,62 @@ mod tests {
             args.windows(3)
                 .any(|window| window == ["--setenv", "NANOSUIT_TEST_FORWARD", "forwarded"])
         );
+    }
+
+    #[test]
+    fn the_configured_env_vars_reach_the_bwrap_arguments() {
+        // The test environment may not set the variable, so set one
+        // the test owns: the name is picked so no other assertion
+        // in the suite could match a stray copy of it.
+        unsafe {
+            env::set_var("NANOSUIT_TEST_ENV_FORWARD", "forwarded");
+        }
+
+        let config = config::Sandbox {
+            env: vec!["NANOSUIT_TEST_ENV_FORWARD".to_owned()],
+            ..Default::default()
+        };
+
+        let args = rendered(&bwrap_args(&config, &project(), Some(&home()), &exe()));
+
+        unsafe {
+            env::remove_var("NANOSUIT_TEST_ENV_FORWARD");
+        }
+
+        assert!(
+            args.windows(3)
+                .any(|window| { window == ["--setenv", "NANOSUIT_TEST_ENV_FORWARD", "forwarded"] })
+        );
+
+        // A variable the host has not set is skipped, not
+        // forwarded empty.
+        let config = config::Sandbox {
+            env: vec!["NANOSUIT_TEST_ENV_ABSENT".to_owned()],
+            ..Default::default()
+        };
+        assert!(env::var_os("NANOSUIT_TEST_ENV_ABSENT").is_none());
+
+        let args = rendered(&bwrap_args(&config, &project(), Some(&home()), &exe()));
+
+        assert!(!args.iter().any(|arg| arg == "NANOSUIT_TEST_ENV_ABSENT"));
+    }
+
+    #[test]
+    fn the_configuration_file_is_remounted_when_present() {
+        // The file may or may not be on the machine: the bind must
+        // track its presence, either way.
+        let file = Config::file();
+
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project(),
+            Some(&home()),
+            &exe(),
+        ));
+
+        let bound = args
+            .windows(3)
+            .any(|window| window[0] == "--ro-bind" && window[1] == file.to_string_lossy().as_ref());
+        assert_eq!(file.is_file(), bound);
     }
 }

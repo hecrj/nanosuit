@@ -7,8 +7,13 @@ edition = "2024"
 decoder = "0.0.3"
 dirs = "7"
 jiff = "0.2"
+log = "0.4"
 reason = "0.2.0-dev"
 serde_json = "1"
+toml = "1"
+
+serde.version = "1"
+serde.features = ["derive"]
 
 tokio.version = "1"
 tokio.features = ["fs", "process", "rt", "sync"]

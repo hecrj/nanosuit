@@ -8,15 +8,18 @@
 //! - the sandboxed process has no host identity and cannot see or
 //!   signal host processes;
 //! - the root filesystem is read-only, with the project, the
-//!   project's data directory, the user's projects directory, and
-//!   a scratchpad under the host's temp directory as the only
-//!   writable places besides the ssh-agent socket;
-//! - the home directory is hidden, with only the Rust toolchain
-//!   remounted;
+//!   project's data directory, and a scratchpad under the host's
+//!   temp directory as the writable places besides the ssh-agent
+//!   socket and whatever the sandbox configuration's `write` list
+//!   allows;
+//! - the home directory is hidden, with the configuration file and
+//!   the paths the sandbox configuration's `read` and `write` lists
+//!   name remounted, read-only or writable as configured;
 //! - the environment is cleared down to `PATH`, `HOME`, `USER`,
 //!   the ssh-agent socket variable, the display variables the GUI
-//!   needs, the host's locale variables, and nanosuit's own `NANOSUIT_*`
-//!   configuration, so tokens the user exported never reach the
+//!   needs, the host's locale variables, nanosuit's own `NANOSUIT_*`
+//!   configuration, and the variables the sandbox configuration's
+//!   `env` list names, so tokens the user exported never reach the
 //!   model's shell.
 //!
 //! Only Linux is supported today, where the sandbox is a
@@ -33,6 +36,7 @@
 //! running bare; the `--we-doin-it-live` flag skips the sandbox
 //! entirely.
 use crate::Project;
+use crate::config;
 
 use std::env;
 use std::fmt;
@@ -50,20 +54,20 @@ const MARKER: &str = "NANOSUIT_SANDBOXED";
 const MARKER_VALUE: &str = "1";
 
 /// Re-executes the process under a sandbox in which `project`,
-/// the directory the tools operate in, the project's data
-/// directory, and the user's projects directory are the only
-/// writable places, besides the scratchpad under the host's temp
-/// directory.
+/// the directory the tools operate in, and the project's data
+/// directory are writable, besides the scratchpad under the
+/// host's temp directory and whatever the sandbox configuration's
+/// `write` list allows.
 ///
 /// See the module documentation for the policy.
-pub fn enter(_project: &Project) -> Result<(), Error> {
+pub fn enter(_config: &config::Sandbox, _project: &Project) -> Result<(), Error> {
     if already_sandboxed() {
         return Ok(());
     }
 
     #[cfg(target_os = "linux")]
     {
-        linux::enter(_project)
+        linux::enter(_config, _project)
     }
 
     #[cfg(not(target_os = "linux"))]

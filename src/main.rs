@@ -12,7 +12,7 @@ mod widget;
 
 use crate::core::sandbox;
 use crate::core::session;
-use crate::core::{Project, Session};
+use crate::core::{Config, Project, Session};
 use crate::diff::Diff;
 use crate::font::Font;
 use crate::item::Item;
@@ -39,6 +39,7 @@ use reason::model;
 
 use std::collections::{BTreeMap, HashMap};
 use std::env;
+use std::process;
 
 /// The flag that runs the app without the bubblewrap sandbox.
 const LIVE: &str = "--we-doin-it-live";
@@ -53,33 +54,50 @@ const MAX_CONTENT_WIDTH: u32 = 770;
 fn main() -> Result<(), iced::Error> {
     tracing_subscriber::fmt::init();
 
-    let args: Vec<_> = env::args().collect();
-    let live = args.iter().any(|arg| arg == LIVE);
-    let resume = args.iter().any(|arg| arg == RESUME);
+    let mut args = env::args().skip(1).peekable();
 
-    // `--resume [PATH]` resumes a session instead of starting a
-    // fresh one: the newest one when the path is left out.
-    let resume_path = args
-        .iter()
-        .position(|arg| arg == RESUME)
-        .and_then(|i| args.get(i + 1))
-        .filter(|arg| !arg.starts_with('-'))
-        .cloned();
+    let mut live = false;
+    let mut resume = false;
+    let mut resume_path = None;
 
-    let prompt = args
-        .iter()
-        .skip(1)
-        .find(|&arg| arg != LIVE && arg != RESUME && Some(arg) != resume_path.as_ref())
-        .cloned();
+    while let Some(option) = args.peek().cloned()
+        && option.starts_with("--")
+    {
+        let _ = args.next();
+
+        match option.as_str() {
+            LIVE => {
+                live = true;
+            }
+            RESUME => {
+                resume = true;
+                resume_path = if args.peek().is_some_and(|path| !path.starts_with("--")) {
+                    args.next()
+                } else {
+                    None
+                };
+            }
+            _ => {
+                eprintln!("unknown option: {option}");
+                process::exit(1);
+            }
+        }
+    }
+
+    let prompt = args.next();
 
     let project = Project::current_dir().expect("the current directory must be resolvable");
+
+    let config = Config::load()
+        .inspect_err(|error| log::warn!("configuration failed to load: {error}"))
+        .unwrap_or_default();
 
     // Re-execute under a sandbox, panicking when that is
     // not possible; `--we-doin-it-live` skips the sandbox.
     if live {
         log::warn!("running unsandboxed: --we-doin-it-live was passed");
     } else {
-        match sandbox::enter(&project) {
+        match sandbox::enter(&config.sandbox, &project) {
             Ok(()) => log::info!("running sandboxed"),
             Err(error) => {
                 panic!("sandboxing failed: {error}; pass --we-doin-it-live to run unsandboxed")

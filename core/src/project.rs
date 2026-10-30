@@ -1,3 +1,5 @@
+use crate::environment;
+
 use std::env;
 use std::fmt;
 use std::io;
@@ -30,10 +32,7 @@ impl Project {
     }
 
     pub fn data_dir(&self) -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_default()
-            .join("nanosuit")
-            .join(&self.id)
+        environment::data_dir().join(&self.id)
     }
 
     pub fn join(&self, path: impl AsRef<Path>) -> PathBuf {

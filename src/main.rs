@@ -88,8 +88,8 @@ fn main() -> Result<(), iced::Error> {
 
     let project = Project::current_dir().expect("the current directory must be resolvable");
 
-    let config = Config::load()
-        .inspect_err(|error| log::warn!("configuration failed to load: {error}"))
+    let config = Config::load(&project)
+        .inspect_err(|error| log::error!("configuration failed to load: {error}"))
         .unwrap_or_default();
 
     // Re-execute under a sandbox, panicking when that is

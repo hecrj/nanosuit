@@ -266,7 +266,7 @@ fn bwrap_args(
             os(&sandbox_data_dir),
         ]);
 
-        let config_file = Config::file();
+        let config_file = Config::global_file();
         let sandbox_config_file = home.join(".config").join(environment::NAME).join(
             config_file
                 .file_name()
@@ -358,6 +358,25 @@ fn bwrap_args(
     // The project, beside the scratchpad above, is the other
     // writable place of the sandbox.
     args.extend([OsString::from("--bind"), os(project), os(project)]);
+
+    // The project's local configuration, bound read-only on top of
+    // the project's writable bind: a sandboxed process could
+    // otherwise widen its own sandbox by editing the file it is
+    // judged by, and the change would take effect on the next
+    // launch. The bind must follow the project's — bubblewrap
+    // layers the later mount over the earlier one, so an earlier
+    // bind would be shadowed and the file would stay writable. The
+    // protection is in-place only: the directory stays writable, so
+    // the file can still be removed and recreated.
+    let local_config_file = Config::local_file(project);
+
+    if local_config_file.is_file() {
+        args.extend([
+            OsString::from("--ro-bind"),
+            os(&local_config_file),
+            os(&local_config_file),
+        ]);
+    }
 
     let canonicalize = |path: &PathBuf| {
         if path == "~" {
@@ -1472,7 +1491,7 @@ mod tests {
     fn the_configuration_file_is_remounted_when_present() {
         // The file may or may not be on the machine: the bind must
         // track its presence, either way.
-        let file = Config::file();
+        let file = Config::global_file();
 
         let args = rendered(&bwrap_args(
             &config::Sandbox::default(),
@@ -1485,5 +1504,46 @@ mod tests {
             .windows(3)
             .any(|window| window[0] == "--ro-bind" && window[1] == file.to_string_lossy().as_ref());
         assert_eq!(file.is_file(), bound);
+    }
+
+    #[test]
+    fn the_local_configuration_file_is_bound_read_only_after_the_project() {
+        // The file is created in a scratch directory so the
+        // assertion does not depend on the machine it runs on.
+        let dir = Directory::create(
+            std::env::temp_dir().join(format!("nanosuit-sandbox-local-{}", std::process::id())),
+        )
+        .unwrap();
+        std::fs::write(dir.join(".nanosuit.toml"), "").unwrap();
+
+        let project = Project::new(dir.as_ref(), Some(home()));
+        let dir = dir.as_ref().to_string_lossy().into_owned();
+        let file = Config::local_file(&project).to_string_lossy().into_owned();
+
+        let args = rendered(&bwrap_args(
+            &config::Sandbox::default(),
+            &project,
+            Some(&home()),
+            &exe(),
+        ));
+
+        let project_bind = args
+            .windows(3)
+            .position(|window| window[0] == "--bind" && window[1] == dir && window[2] == dir);
+        let local_bind = args.windows(3).position(|window| {
+            window[0] == "--ro-bind" && window[1] == file && window[2] == file
+        });
+
+        // The read-only bind must layer over the project's writable
+        // bind: bubblewrap mounts in argument order, so an earlier
+        // bind would be shadowed and the file would stay writable.
+        let (Some(project_bind), Some(local_bind)) = (project_bind, local_bind) else {
+            panic!("the project or the local configuration is not bound: {args:?}");
+        };
+
+        assert!(
+            local_bind > project_bind,
+            "the local configuration bind at {local_bind} must follow the project bind at {project_bind}"
+        );
     }
 }

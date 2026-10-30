@@ -126,46 +126,59 @@ impl Hunk {
         let path = Arc::from(path);
         let diff = Diff::new(&path, &old, &new, background);
 
-        let indices = {
-            let mut old = hunk.old.start;
-            let mut new = hunk.new.start;
+        let mut indices = Vec::with_capacity(diff.lines.len());
+        let mut lines = Vec::with_capacity(diff.lines.len());
 
-            diff.lines
-                .iter()
-                .map(|line| {
-                    let number = match line.tag {
-                        Tag::Addition => git::Number::New(new),
-                        Tag::Deletion => git::Number::Old(old),
-                        Tag::Context => git::Number::Context(old, new),
-                    };
+        let mut old = hunk.old.start;
+        let mut new = hunk.new.start;
 
-                    let index = Index {
+        for line in diff.lines.iter() {
+            // The first span is the two-character display
+            // prefix, `  `, `+ `, or `- `: strip it, so the hunk
+            // holds the line as git does
+            let text = line.text()[2..].to_owned();
+
+            match line.tag {
+                Tag::Context => {
+                    lines.push(git::Line::Context { old, new, text });
+                    indices.push(Index {
                         path: path.clone(),
-                        number,
-                    };
+                        number: git::Number::Context(old, new),
+                    });
 
-                    match line.tag {
-                        Tag::Context => {
-                            old += 1;
-                            new += 1;
-                        }
-                        Tag::Addition => {
-                            new += 1;
-                        }
-                        Tag::Deletion => {
-                            old += 1;
-                        }
-                    }
+                    old += 1;
+                    new += 1;
+                }
+                Tag::Addition => {
+                    lines.push(git::Line::Added { new, text });
+                    indices.push(Index {
+                        path: path.clone(),
+                        number: git::Number::New(new),
+                    });
 
-                    index
-                })
-                .collect()
-        };
+                    new += 1;
+                }
+                Tag::Deletion => {
+                    lines.push(git::Line::Deleted { old, text });
+                    indices.push(Index {
+                        path: path.clone(),
+                        number: git::Number::Old(old),
+                    });
+
+                    old += 1;
+                }
+            }
+        }
 
         Self {
-            raw: hunk.clone(),
+            raw: git::Hunk {
+                old: hunk.old,
+                new: hunk.new,
+                heading: hunk.heading.clone(),
+                lines: Arc::from(lines),
+            },
             diff,
-            indices,
+            indices: Arc::from(indices),
         }
     }
 

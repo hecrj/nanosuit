@@ -198,11 +198,8 @@ impl Repository {
                 for (file, tasks) in diff.files.iter().zip(tasks) {
                     let mut hunks = Vec::new();
 
-                    for (hunk, task) in file.hunks.iter().zip(tasks) {
-                        hunks.push(Hunk {
-                            raw: hunk.clone(),
-                            diff: task.await?,
-                        });
+                    for task in tasks {
+                        hunks.push(Hunk { diff: task.await? });
                     }
 
                     files.push(File {
@@ -262,7 +259,7 @@ impl Repository {
             // The commented line and the two lines before it,
             // without their superfluous indentation
             let start = position.saturating_sub(2);
-            let slice = hunk.raw.slice(start..=position).trim();
+            let slice = hunk.diff.raw().slice(start..=position).trim();
             let hunk = diff::Hunk::from_git(&index.path, &slice, tool::BACKGROUND);
 
             // With the order of the line in the diff: file, hunk, line
@@ -465,7 +462,6 @@ pub struct File {
 
 #[derive(Debug, Clone)]
 pub struct Hunk {
-    raw: git::Hunk,
     diff: diff::Hunk,
 }
 
@@ -475,13 +471,15 @@ impl Hunk {
         comments: &'a HashMap<diff::Index, Draft>,
         is_reviewing: bool,
     ) -> impl Widget<Message> + 'a {
+        let raw = self.diff.raw();
+
         let heading = self
             .diff
             .gutter(format!(
                 "  @@ -{} +{} @@{}",
-                self.raw.old,
-                self.raw.new,
-                if let Some(heading) = &self.raw.heading {
+                raw.old,
+                raw.new,
+                if let Some(heading) = &raw.heading {
                     format!(" {heading}")
                 } else {
                     "".to_owned()
@@ -779,7 +777,7 @@ mod tests {
                 deletions: 2,
                 hunks: Arc::from([raw.clone()]),
             },
-            hunks: Arc::from([Hunk { raw, diff }]),
+            hunks: Arc::from([Hunk { diff }]),
         }
     }
 
@@ -1043,7 +1041,7 @@ mod tests {
                     deletions: 1,
                     hunks: Arc::from([raw.clone()]),
                 },
-                hunks: Arc::from([Hunk { raw, diff }]),
+                hunks: Arc::from([Hunk { diff }]),
             }],
             vec![pending(
                 anchor(PATH, git::Number::Context(2, 2)),
@@ -1062,6 +1060,77 @@ mod tests {
 
         assert_eq!(comment.index.number, git::Number::Context(2, 2));
         assert_eq!(comment.content.raw(), "a context");
+
+        let numbers: Vec<_> = comment.hunk.view().map(|view| view.index.number).collect();
+        assert_eq!(
+            numbers,
+            vec![git::Number::Context(1, 1), git::Number::Context(2, 2)]
+        );
+    }
+
+    #[test]
+    fn a_comment_quotes_the_displayed_line_when_git_aligns_differently() {
+        // Git and the display may align the same hunk differently
+        // and name different lines at the same position: here git
+        // deletes the first `a` and adds one at the end, while the
+        // display moves the `b` instead
+        let raw = git::Hunk {
+            old: git::Range { start: 1, count: 3 },
+            new: git::Range { start: 1, count: 3 },
+            heading: None,
+            lines: Arc::from([
+                git::Line::Deleted {
+                    old: 1,
+                    text: "a".into(),
+                },
+                git::Line::Context {
+                    old: 2,
+                    new: 1,
+                    text: "b".into(),
+                },
+                git::Line::Context {
+                    old: 3,
+                    new: 2,
+                    text: "a".into(),
+                },
+                git::Line::Added {
+                    new: 3,
+                    text: "a".into(),
+                },
+            ]),
+        };
+
+        let diff = diff::Hunk::from_git(PATH, &raw, tool::BACKGROUND);
+
+        assert_eq!(diff.lines()[0].text(), "+ b");
+
+        let mut repository = repository(
+            vec![File {
+                raw: git::File {
+                    path: PATH.to_owned(),
+                    original: None,
+                    state: git::State::Modified,
+                    mode_changed: false,
+                    insertions: 1,
+                    deletions: 1,
+                    hunks: Arc::from([raw.clone()]),
+                },
+                hunks: Arc::from([Hunk { diff }]),
+            }],
+            vec![pending(anchor(PATH, git::Number::New(1)), "the b")],
+            "",
+        );
+
+        let Some(review) = repository.finish_review() else {
+            unreachable!()
+        };
+
+        let [comment] = &review.comments[..] else {
+            unreachable!()
+        };
+
+        assert_eq!(comment.index.number, git::Number::New(1));
+        assert_eq!(comment.hunk.lines().last().unwrap().text(), "+ b");
     }
 
     fn comment(path: &str, number: git::Number, line: git::Line, content: &str) -> Comment {

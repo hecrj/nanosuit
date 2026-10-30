@@ -339,8 +339,10 @@ impl Repository {
         let status = self.status.as_ref()?;
 
         let branch = match &status.branch {
-            git::Branch::Unborn(name) | git::Branch::Named(name) => text!("@ {name}"),
-            git::Branch::Detached(_sha) => text("@ detached HEAD").style(text::warning),
+            git::Branch::Unborn(name) | git::Branch::Named(name) => {
+                text!("{name}").style(text::secondary)
+            }
+            git::Branch::Detached(_sha) => text("detached HEAD").style(text::warning),
         }
         .size(font::SMALL);
 
@@ -363,7 +365,7 @@ impl Repository {
         .spacing(5)
         .align_y(Center);
 
-        let review = button(changes)
+        let review = button(row![branch, changes].spacing(8))
             .on_press(Message::ToggleReview)
             .padding([0, 2])
             .style(|theme: &Theme, status| {
@@ -384,7 +386,7 @@ impl Repository {
                 }
             });
 
-        Some(row![branch, review].spacing(8))
+        Some(review)
     }
 
     pub fn review(&self) -> impl Widget<Message> {

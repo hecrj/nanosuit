@@ -78,8 +78,9 @@ const TEMPLATE: &str = "\
 # the host has not set is skipped.
 env = []
 
-# The paths to bring back read-only, like a public ssh key the
-# model should be able to see.
+# The paths to bring back read-only, like `~/.ssh/known_hosts` and
+# `~/.gitconfig` for git over ssh, or a public ssh key the model
+# should be able to see.
 read = []
 
 # The paths to bring back writable, like a Rust toolchain and the

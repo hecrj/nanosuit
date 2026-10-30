@@ -27,15 +27,7 @@
 //! - the ssh-agent socket is bound in, and the directory it lives
 //!   in blanked, so the GnuPG agent's other sockets — the full
 //!   gpg-agent protocol, with its secret-key commands — stay out
-//!   while ssh transport and signing keep working; the host's
-//!   known ssh host keys come back read-only, so `git` can reach
-//!   private repositories without the key material ever entering
-//!   the sandbox;
-//! - the ssh signing public key and the allowed-signers file the
-//!   global git configuration names are bound read-only, so
-//!   `gpg.format = ssh` commits can be made and verified
-//!   in-sandbox; the private key they reference stays behind the
-//!   home tmpfs;
+//!   while ssh transport and signing keep working;
 //! - the environment is cleared down to `PATH`, `HOME`, `USER`, the
 //!   ssh-agent socket variable, the display variables the GUI needs
 //!   to reach the compositor, the host's locale variables —
@@ -321,48 +313,6 @@ fn bwrap_args(
         args.extend([OsString::from("--ro-bind"), os(&authority), os(&authority)]);
     }
 
-    // The host's known ssh host keys, read-only, so a
-    // non-interactive `git clone` can verify the host it reaches.
-    // They are public data, not a credential; read-only, the model
-    // can read them but not plant a hostile host key.
-    if let Some(home) = home {
-        let known_hosts = home.join(".ssh").join("known_hosts");
-        if known_hosts.is_file() {
-            args.extend([
-                OsString::from("--ro-bind"),
-                os(&known_hosts),
-                os(&known_hosts),
-            ]);
-        }
-    }
-
-    // The host's global git configuration, read-only, so commits
-    // in the sandbox carry the host's identity instead of dying
-    // with "unable to auto-detect email address". Git, unlike ssh,
-    // performs no ownership check on its config files, so the bind
-    // works as-is. It is configuration, not a credential: the model
-    // can read aliases and helper names but cannot alter the file,
-    // and anything it references — includes, credential stores —
-    // stays hidden behind the home tmpfs.
-    if let Some(home) = home {
-        let gitconfig = home.join(".gitconfig");
-        if gitconfig.is_file() {
-            args.extend([OsString::from("--ro-bind"), os(&gitconfig), os(&gitconfig)]);
-        }
-    }
-
-    // The files ssh-format signing needs, as named by the global
-    // git configuration, read-only. With `gpg.format = ssh`, `git`
-    // reads the public key file (`user.signingkey`) to ask the agent
-    // to sign, and verifies against the signers list
-    // (`gpg.ssh.allowedSignersFile`); both are public data, never a
-    // credential, and the private key they describe stays behind the
-    // home tmpfs. A fingerprint in `user.signingkey` — the openpgp
-    // form — names no file, so nothing is bound for it.
-    if let Some(home) = home {
-        args.extend(ssh_signing_binds(home));
-    }
-
     // ssh(1) refuses config files owned by anyone but root or the
     // invoking user, and dies. In the rootless user namespace the
     // host's root-owned files appear owned by the unmapped uid, so
@@ -604,93 +554,6 @@ fn agent_socket() -> Option<PathBuf> {
     env::var_os("SSH_AUTH_SOCK")
         .map(PathBuf::from)
         .filter(|socket| is_socket(socket))
-}
-
-/// The read-only binds ssh-format signing needs: the public key
-/// file `user.signingkey` names and the signers list
-/// `gpg.ssh.allowedSignersFile` names, when the global git
-/// configuration in `home` sets them and the files exist. Both are
-/// public data; the private key they describe stays on the host.
-fn ssh_signing_binds(home: &Path) -> Vec<OsString> {
-    let os = |path: &Path| path.as_os_str().to_os_string();
-
-    let (signingkey, signers) = match git_config_values(&home.join(".gitconfig")) {
-        Some(values) => values,
-        None => return Vec::new(),
-    };
-
-    let mut args = Vec::new();
-    for path in [signingkey, signers]
-        .into_iter()
-        .flatten()
-        .map(PathBuf::from)
-        .filter(|path| path.is_file())
-    {
-        args.extend([OsString::from("--ro-bind"), os(&path), os(&path)]);
-    }
-    args
-}
-
-/// The ssh-signing-relevant values of a git configuration file:
-/// `user.signingkey` and `gpg.ssh.allowedSignersFile`, or `None`
-/// when the file cannot be read. The signers value may be spelled
-/// either as a dotted key under `[gpg]` or as a bare key under
-/// `[gpg "ssh"]`; both are accepted. A value that does not name a
-/// file — a fingerprint, the openpgp form of `user.signingkey` —
-/// is left to the caller's filter.
-fn git_config_values(path: &Path) -> Option<(Option<String>, Option<String>)> {
-    let text = std::fs::read_to_string(path).ok()?;
-
-    let mut section = String::new();
-    let mut subsection = String::new();
-    let mut signingkey: Option<String> = None;
-    let mut signers: Option<String> = None;
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-
-        if let Some(header) = line
-            .strip_prefix('[')
-            .and_then(|rest| rest.strip_suffix(']'))
-        {
-            // `[section]` or `[section "subsection"]`
-            let mut parts = header.trim().splitn(2, char::is_whitespace);
-            section = parts.next().unwrap_or_default().to_ascii_lowercase();
-            subsection = parts
-                .next()
-                .unwrap_or_default()
-                .trim_matches('"')
-                .to_ascii_lowercase();
-            continue;
-        }
-
-        let (key, value) = match line.split_once('=') {
-            Some((key, value)) => (key.trim().to_ascii_lowercase(), value.trim()),
-            None => continue,
-        };
-
-        let full = if subsection.is_empty() {
-            format!("{section}.{key}")
-        } else {
-            format!("{section}.{subsection}.{key}")
-        };
-
-        let value = value
-            .strip_prefix('"')
-            .and_then(|rest| rest.strip_suffix('"'))
-            .unwrap_or(value);
-
-        match full.as_str() {
-            "user.signingkey" => signingkey = Some(value.to_owned()),
-            "gpg.ssh.allowedsignersfile" => signers = Some(value.to_owned()),
-            _ => {}
-        }
-    }
-
-    Some((signingkey, signers))
 }
 
 /// Whether `path` names a socket, following any symlink the way an
@@ -1353,57 +1216,6 @@ mod tests {
     }
 
     #[test]
-    fn the_known_host_keys_are_bound_when_present() {
-        let root = std::env::temp_dir()
-            .join(format!("nanosuit-sandbox-ssh-test-{}", std::process::id()))
-            .join("home");
-        std::fs::create_dir_all(root.join(".ssh")).unwrap();
-        std::fs::write(
-            root.join(".ssh").join("known_hosts"),
-            "github.com ssh-ed25519 AAAA\n",
-        )
-        .unwrap();
-
-        let args = rendered(&bwrap_args(
-            &config::Sandbox::default(),
-            &project(),
-            Some(&root),
-            &exe(),
-        ));
-
-        let known_hosts = root
-            .join(".ssh")
-            .join("known_hosts")
-            .to_string_lossy()
-            .into_owned();
-
-        assert!(args.windows(3).any(|window| {
-            window[0] == "--ro-bind" && window[1] == known_hosts && window[2] == known_hosts
-        }));
-    }
-
-    #[test]
-    fn the_known_host_keys_are_not_bound_when_absent() {
-        let root = std::env::temp_dir()
-            .join(format!(
-                "nanosuit-sandbox-ssh-empty-test-{}",
-                std::process::id()
-            ))
-            .join("home");
-        std::fs::create_dir_all(&root).unwrap();
-
-        let args = rendered(&bwrap_args(
-            &config::Sandbox::default(),
-            &project(),
-            Some(&root),
-            &exe(),
-        ));
-
-        // No `known_hosts` in this home, so nothing is bound for it.
-        assert!(!args.iter().any(|arg| arg.contains("known_hosts")));
-    }
-
-    #[test]
     fn the_agent_socket_is_bound_when_set() {
         // The test environment may run without an ssh agent, in
         // which case there is nothing to bind.
@@ -1429,138 +1241,6 @@ mod tests {
             args.windows(3)
                 .any(|window| window[0] == "--setenv" && window[1] == "SSH_AUTH_SOCK")
         );
-    }
-
-    /// A temp home holding the two files ssh signing binds, for
-    /// configuring a `.gitconfig` against; returns the home and the
-    /// file paths.
-    fn ssh_signing_home(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
-        let ssh = root.join(".ssh");
-        std::fs::create_dir_all(&ssh).unwrap();
-        let pub_key = ssh.join("id_ed25519.pub");
-        std::fs::write(&pub_key, "ssh-ed25519 AAAA test\n").unwrap();
-        let signers = ssh.join("allowed_signers");
-        std::fs::write(&signers, "* ssh-ed25519 AAAA test\n").unwrap();
-        (root.to_path_buf(), pub_key, signers)
-    }
-
-    #[test]
-    fn the_ssh_signing_files_are_bound_when_configured() {
-        let root = std::env::temp_dir()
-            .join(format!("nanosuit-sandbox-ssh-sign-{}", std::process::id()))
-            .join("home");
-        let (home, pub_key, signers) = ssh_signing_home(&root);
-        std::fs::write(
-            home.join(".gitconfig"),
-            format!(
-                "[user]\n\temail = x@y.z\n\tsigningkey = {pub}\n[gpg]\n\tformat = ssh\n\tssh.allowedSignersFile = {sig}\n",
-                pub = pub_key.display(),
-                sig = signers.display(),
-            ),
-        )
-        .unwrap();
-
-        let args = rendered(&bwrap_args(
-            &config::Sandbox::default(),
-            &project(),
-            Some(&home),
-            &exe(),
-        ));
-
-        for file in [&pub_key, &signers] {
-            let path = file.to_string_lossy().into_owned();
-            assert!(
-                args.windows(3).any(|window| {
-                    window[0] == "--ro-bind" && window[1] == path && window[2] == path
-                }),
-                "missing {path}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_signers_file_is_found_in_subsection_form() {
-        let root = std::env::temp_dir()
-            .join(format!(
-                "nanosuit-sandbox-ssh-sign-sub-{}",
-                std::process::id()
-            ))
-            .join("home");
-        let (home, pub_key, signers) = ssh_signing_home(&root);
-        std::fs::write(
-            home.join(".gitconfig"),
-            format!(
-                "[user]\n\tsigningkey = {pub}\n[gpg \"ssh\"]\n\tallowedSignersFile = {sig}\n",
-                pub = pub_key.display(),
-                sig = signers.display(),
-            ),
-        )
-        .unwrap();
-
-        let args = rendered(&bwrap_args(
-            &config::Sandbox::default(),
-            &project(),
-            Some(&home),
-            &exe(),
-        ));
-
-        for file in [&pub_key, &signers] {
-            let path = file.to_string_lossy().into_owned();
-            assert!(
-                args.windows(3).any(|window| {
-                    window[0] == "--ro-bind" && window[1] == path && window[2] == path
-                }),
-                "missing {path}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_fingerprint_signingkey_binds_nothing() {
-        // In openpgp form `user.signingkey` is a fingerprint, not a
-        // file, so no ssh-signing bind may appear for it.
-        let root = std::env::temp_dir()
-            .join(format!(
-                "nanosuit-sandbox-ssh-sign-fpr-{}",
-                std::process::id()
-            ))
-            .join("home");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(
-            root.join(".gitconfig"),
-            "[user]\n\tsigningkey = 1B8B3BF178EB4639B145E8447CC46565708259A7\n[gpg]\n\tformat = ssh\n\tssh.allowedSignersFile = /nonexistent/signers\n",
-        )
-        .unwrap();
-
-        let args = rendered(&bwrap_args(
-            &config::Sandbox::default(),
-            &project(),
-            Some(&root),
-            &exe(),
-        ));
-
-        assert!(!args.iter().any(|arg| arg.contains("1B8B3BF1")));
-        assert!(!args.iter().any(|arg| arg.contains("signers")));
-    }
-
-    #[test]
-    fn a_home_without_gitconfig_binds_no_ssh_signing() {
-        let root = std::env::temp_dir()
-            .join(format!(
-                "nanosuit-sandbox-ssh-sign-none-{}",
-                std::process::id()
-            ))
-            .join("home");
-        std::fs::create_dir_all(&root).unwrap();
-
-        let args = rendered(&bwrap_args(
-            &config::Sandbox::default(),
-            &project(),
-            Some(&root),
-            &exe(),
-        ));
-
-        assert!(!args.iter().any(|arg| arg.contains("id_ed25519.pub")));
     }
 
     #[test]

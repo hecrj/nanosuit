@@ -52,7 +52,13 @@ const RESUME: &str = "--resume";
 const MAX_CONTENT_WIDTH: u32 = 770;
 
 fn main() -> Result<(), iced::Error> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing_subscriber::filter::LevelFilter::WARN.into())
+                .from_env_lossy(),
+        )
+        .init();
 
     let mut args = env::args().skip(1).peekable();
 

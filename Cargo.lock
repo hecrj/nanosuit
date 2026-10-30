@@ -2219,6 +2219,7 @@ version = "0.1.0-dev"
 dependencies = [
  "decoder",
  "dirs",
+ "indexmap",
  "jiff",
  "log",
  "nanosuit-test",

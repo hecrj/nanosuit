@@ -35,8 +35,9 @@
 //!   host set none — so gpg and git render accented names instead
 //!   of mangling them under the bare C locale, nanosuit's own
 //!   `NANOSUIT_*` configuration variables, like `NANOSUIT_SERVER_URL`,
-//!   and the variables the sandbox configuration's `env` list names,
-//!   whose values are taken from the host — while tokens the user
+//!   and the variables the sandbox configuration's `env` names,
+//!   with the host's value at launch for an inherited name and a
+//!   literal value for a pinned one — while tokens the user
 //!   exported never reach the model's shell.
 use crate::config;
 use crate::environment;
@@ -521,12 +522,14 @@ fn bwrap_args(
         config
             .env
             .iter()
-            .filter_map(|var| {
-                Some([
-                    OsString::from("--setenv"),
-                    OsString::from(var),
-                    env::var_os(var)?,
-                ])
+            .filter_map(|(variable, binding)| {
+                let value = match binding {
+                    config::Binding::Inherit(true) => env::var_os(variable)?,
+                    config::Binding::Value(value) => OsString::from(value),
+                    config::Binding::Inherit(false) => return None,
+                };
+
+                Some([OsString::from("--setenv"), OsString::from(variable), value])
             })
             .flatten(),
     );
@@ -1682,7 +1685,9 @@ mod tests {
         }
 
         let config = config::Sandbox {
-            env: vec!["NANOSUIT_TEST_ENV_FORWARD".to_owned()],
+            env: vec!["NANOSUIT_TEST_ENV_FORWARD".to_owned()]
+                .into_iter()
+                .collect(),
             ..Default::default()
         };
 
@@ -1700,7 +1705,9 @@ mod tests {
         // A variable the host has not set is skipped, not
         // forwarded empty.
         let config = config::Sandbox {
-            env: vec!["NANOSUIT_TEST_ENV_ABSENT".to_owned()],
+            env: vec!["NANOSUIT_TEST_ENV_ABSENT".to_owned()]
+                .into_iter()
+                .collect(),
             ..Default::default()
         };
         assert!(env::var_os("NANOSUIT_TEST_ENV_ABSENT").is_none());
@@ -1708,6 +1715,53 @@ mod tests {
         let args = rendered(&bwrap_args(&config, &project(), Some(&home()), &exe()));
 
         assert!(!args.iter().any(|arg| arg == "NANOSUIT_TEST_ENV_ABSENT"));
+    }
+
+    #[test]
+    fn the_configured_env_bindings_reach_the_bwrap_arguments() {
+        // The names are picked so no other assertion in the suite
+        // could match a stray copy of them: the literal one is
+        // checked absent on the host, the skipped one present.
+        // The skipped one avoids the `NANOSUIT_` prefix: the
+        // sandbox forwards those on its own, regardless of the
+        // configuration.
+        unsafe {
+            env::set_var("NANO_SUITE_TEST_SKIP", "host value");
+        }
+
+        assert!(env::var_os("NANOSUIT_TEST_ENV_LITERAL").is_none());
+
+        let config = config::Sandbox {
+            env: [
+                (
+                    "NANOSUIT_TEST_ENV_LITERAL".to_owned(),
+                    config::Binding::Value("pinned".to_owned()),
+                ),
+                (
+                    "NANO_SUITE_TEST_SKIP".to_owned(),
+                    config::Binding::Inherit(false),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        let args = rendered(&bwrap_args(&config, &project(), Some(&home()), &exe()));
+
+        unsafe {
+            env::remove_var("NANO_SUITE_TEST_SKIP");
+        }
+
+        // A literal value is forwarded as pinned, without asking
+        // the host.
+        assert!(
+            args.windows(3)
+                .any(|window| window == ["--setenv", "NANOSUIT_TEST_ENV_LITERAL", "pinned"])
+        );
+
+        // A `false` entry is skipped, even though the host set it.
+        assert!(!args.iter().any(|arg| arg == "NANO_SUITE_TEST_SKIP"));
     }
 
     #[test]

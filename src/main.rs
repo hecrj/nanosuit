@@ -501,11 +501,15 @@ impl Nanosuit {
 
                 item.update(message).map(Message::Item.with(i))
             }
-            Message::Connected(Err(error))
-            | Message::ModelsListed(Err(error))
-            | Message::ReplyReceived(Err(error))
-            | Message::CompactionReceived(Err(error)) => {
+            Message::Connected(Err(error)) | Message::ModelsListed(Err(error)) => {
                 self.connection = Connection::Disconnected;
+                self.abort();
+
+                log::debug!("{error}");
+
+                Task::none()
+            }
+            Message::ReplyReceived(Err(error)) | Message::CompactionReceived(Err(error)) => {
                 self.abort();
 
                 log::error!("{error}");

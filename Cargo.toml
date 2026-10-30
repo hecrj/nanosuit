@@ -29,7 +29,7 @@ tokio.version = "1"
 tokio.features = ["fs", "process", "sync"]
 
 tracing-subscriber.version = "0.3"
-tracing-subscriber.features = ["tracing-log"]
+tracing-subscriber.features = ["tracing-log", "env-filter"]
 
 [dev-dependencies]
 nanosuit-test = { version = "0.1.0-dev", path = "./test" }

@@ -456,6 +456,14 @@ fn bwrap_args(
         args.extend([OsString::from("--setenv"), OsString::from("USER"), value]);
     }
 
+    if let Some(value) = env::var_os("RUST_LOG") {
+        args.extend([
+            OsString::from("--setenv"),
+            OsString::from("RUST_LOG"),
+            value,
+        ]);
+    }
+
     // The ssh-agent socket the bind above put in place; `ssh` looks
     // for it here.
     if let Some(value) = env::var_os("SSH_AUTH_SOCK") {

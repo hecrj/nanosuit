@@ -359,25 +359,6 @@ fn bwrap_args(
     // writable place of the sandbox.
     args.extend([OsString::from("--bind"), os(project), os(project)]);
 
-    // The project's local configuration, bound read-only on top of
-    // the project's writable bind: a sandboxed process could
-    // otherwise widen its own sandbox by editing the file it is
-    // judged by, and the change would take effect on the next
-    // launch. The bind must follow the project's — bubblewrap
-    // layers the later mount over the earlier one, so an earlier
-    // bind would be shadowed and the file would stay writable. The
-    // protection is in-place only: the directory stays writable, so
-    // the file can still be removed and recreated.
-    let local_config_file = Config::local_file(project);
-
-    if local_config_file.is_file() {
-        args.extend([
-            OsString::from("--ro-bind"),
-            os(&local_config_file),
-            os(&local_config_file),
-        ]);
-    }
-
     let canonicalize = |path: &PathBuf| {
         if path == "~" {
             return None;
@@ -406,19 +387,38 @@ fn bwrap_args(
 
     args.extend(
         config
+            .write
+            .iter()
+            .filter_map(parse)
+            .flat_map(|path| [OsString::from("--bind"), os(&path), os(&path)]),
+    );
+
+    args.extend(
+        config
             .read
             .iter()
             .filter_map(parse)
             .flat_map(|path| [OsString::from("--ro-bind"), os(&path), os(&path)]),
     );
 
-    args.extend(
-        config
-            .write
-            .iter()
-            .filter_map(parse)
-            .flat_map(|path| [OsString::from("--bind"), os(&path), os(&path)]),
-    );
+    // The project's local configuration, bound read-only on top of
+    // the project's writable bind: a sandboxed process could
+    // otherwise widen its own sandbox by editing the file it is
+    // judged by, and the change would take effect on the next
+    // launch. The bind must follow the project's — bubblewrap
+    // layers the later mount over the earlier one, so an earlier
+    // bind would be shadowed and the file would stay writable. The
+    // protection is in-place only: the directory stays writable, so
+    // the file can still be removed and recreated.
+    let local_config_file = Config::local_file(project);
+
+    if local_config_file.is_file() {
+        args.extend([
+            OsString::from("--ro-bind"),
+            os(&local_config_file),
+            os(&local_config_file),
+        ]);
+    }
 
     // A minimal `/dev` and a `/proc` that only knows the sandbox's
     // own pid namespace.
@@ -903,6 +903,89 @@ mod tests {
     }
 
     #[test]
+    fn the_read_paths_are_bound_read_only_after_the_write_paths() {
+        // Where the configuration claims a place in both lists, the
+        // read-only bind must win: read-only is the root
+        // filesystem's default, and bubblewrap layers the later
+        // mount over the earlier one, so a writable bind emitted
+        // after a read-only one would shadow it and bring the
+        // place back writable. A temp home, so the assertion does
+        // not depend on the machine it runs on.
+        let root = std::env::temp_dir()
+            .join(format!(
+                "nanosuit-sandbox-read-write-{}",
+                std::process::id()
+            ))
+            .join("home");
+        std::fs::create_dir_all(root.join(".ssh")).unwrap();
+        std::fs::create_dir_all(root.join("projects").join("shared")).unwrap();
+
+        // `~/.ssh` is claimed by both lists, and the read claim of
+        // `~/projects/shared` reaches into the write claim of
+        // `~/projects`.
+        let config = config::Sandbox {
+            read: vec![PathBuf::from("~/.ssh"), PathBuf::from("~/projects/shared")],
+            write: vec![PathBuf::from("~/.ssh"), PathBuf::from("~/projects")],
+            ..Default::default()
+        };
+
+        let args = rendered(&bwrap_args(&config, &project(), Some(&root), &exe()));
+
+        let ssh = root.join(".ssh").to_string_lossy().into_owned();
+        let shared = root
+            .join("projects")
+            .join("shared")
+            .to_string_lossy()
+            .into_owned();
+        let projects = root.join("projects").to_string_lossy().into_owned();
+
+        let read_binds = args
+            .windows(3)
+            .enumerate()
+            .filter(|(_, window)| {
+                window[0] == "--ro-bind"
+                    && window[1] == window[2]
+                    && (window[1] == ssh || window[1] == shared)
+            })
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        let write_binds = args
+            .windows(3)
+            .enumerate()
+            .filter(|(_, window)| {
+                window[0] == "--bind"
+                    && window[1] == window[2]
+                    && (window[1] == ssh || window[1] == projects)
+            })
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            read_binds.len(),
+            2,
+            "the read paths are not bound: {args:?}"
+        );
+        assert_eq!(
+            write_binds.len(),
+            2,
+            "the write paths are not bound: {args:?}"
+        );
+
+        // Every read-only bind must layer over every writable bind:
+        // bubblewrap mounts in argument order, so an earlier read-
+        // only bind would be shadowed and the place would stay
+        // writable.
+        for read in &read_binds {
+            for write in &write_binds {
+                assert!(
+                    read > write,
+                    "the read-only bind at {read} must follow the writable bind at {write}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_configured_path_that_is_missing_is_skipped() {
         let root = std::env::temp_dir()
             .join(format!("nanosuit-sandbox-missing-{}", std::process::id()))
@@ -922,16 +1005,13 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.ends_with("/projects")));
     }
 
-    #[test]
-    fn a_live_sandbox_mounts_the_configured_projects_directory_and_sessions_writable() {
-        // Skipped where `bwrap` is unavailable, like the display
-        // tests, and where the nested user namespace it needs
-        // cannot be created, so the probe runs first.
-        let Some(bwrap) = find_on_path(BINARY, env::var_os("PATH").as_deref()) else {
-            return;
-        };
+    /// A `bwrap` the live probes can use: one on the `PATH` that
+    /// can create the nested user namespace they need. `None` where
+    /// either is unavailable, like the display tests skip.
+    fn live_probe() -> Option<PathBuf> {
+        let bwrap = find_on_path(BINARY, env::var_os("PATH").as_deref())?;
 
-        let probe = std::process::Command::new(&bwrap)
+        let status = std::process::Command::new(&bwrap)
             .args([
                 "--unshare-user",
                 "--unshare-pid",
@@ -945,13 +1025,20 @@ mod tests {
                 "--",
                 "true",
             ])
-            .status();
-        let Ok(status) = probe else {
+            .status()
+            .ok()?;
+
+        status.success().then_some(bwrap)
+    }
+
+    #[test]
+    fn a_live_sandbox_mounts_the_configured_projects_directory_and_sessions_writable() {
+        // Skipped where `bwrap` is unavailable, like the display
+        // tests, and where the nested user namespace it needs
+        // cannot be created, so the probe runs first.
+        let Some(bwrap) = live_probe() else {
             return;
         };
-        if !status.success() {
-            return;
-        }
 
         let root = std::env::temp_dir()
             .join(format!("nanosuit-sandbox-live-{}", std::process::id()))
@@ -1020,6 +1107,142 @@ mod tests {
         // host: the data directory bind outlives the sandbox.
         let probe_file = project.data_dir().join("sessions/probe");
         assert!(probe_file.is_file(), "the session probe did not persist");
+    }
+
+    #[test]
+    fn a_live_sandbox_keeps_the_local_configuration_read_only_under_a_writable_directory() {
+        // The configuration's `write` list names the project's
+        // parent directory, so the whole tree — the project and its
+        // local configuration — comes back over the read-only root.
+        // The local configuration's read-only bind must still make
+        // the file refuse writes in a live sandbox, not merely order
+        // after the binds in the arguments: an earlier ordering
+        // mounted the wider writable bind over it, and a write
+        // inside the sandbox reached the host's file.
+        let Some(bwrap) = live_probe() else {
+            return;
+        };
+
+        let root = std::env::temp_dir()
+            .join(format!(
+                "nanosuit-sandbox-local-live-{}",
+                std::process::id()
+            ))
+            .join("home");
+        let project_path = root.join("projects").join("nanosuit");
+        std::fs::create_dir_all(&project_path).unwrap();
+        std::fs::write(project_path.join(".nanosuit.toml"), "").unwrap();
+
+        // The scratchpad leaf and the data directory must exist on
+        // the host for their binds.
+        let project = Project::new(&project_path, None);
+        prepare_scratch(&scratch_leaf(&project)).expect("scratch leaf");
+        let _data_dir = Directory::create(project.data_dir()).expect("data dir");
+
+        let config = config::Sandbox {
+            write: vec![root.join("projects")],
+            ..Default::default()
+        };
+
+        let mut args = bwrap_args(&config, &project, Some(&root), &exe());
+        args.truncate(args.len() - 2); // Drop the `--` and the executable.
+        let probe = format!(
+            "touch {p}/scratch 2>/dev/null && echo PROJECT_WRITABLE || echo PROJECT_READONLY; \
+             touch {p}/.nanosuit.toml 2>/dev/null && echo LOCAL_WRITABLE || echo LOCAL_READONLY",
+            p = project_path.display(),
+        );
+        args.extend([
+            OsString::from("--"),
+            OsString::from("sh"),
+            OsString::from("-c"),
+            OsString::from(&probe),
+        ]);
+
+        let output = match std::process::Command::new(&bwrap).args(&args).output() {
+            // A spawn failure is an environment problem, not a
+            // policy one; skip.
+            Err(_) => return,
+            Ok(output) => output,
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !output.status.success() {
+            // Same: a nested sandbox that cannot start — a device
+            // or namespace limit — is an environment problem.
+            return;
+        }
+
+        assert!(stdout.contains("PROJECT_WRITABLE"), "{stdout}");
+        assert!(!stdout.contains("LOCAL_WRITABLE"), "{stdout}");
+        assert!(stdout.contains("LOCAL_READONLY"), "{stdout}");
+    }
+
+    #[test]
+    fn a_live_sandbox_keeps_a_read_claim_read_only_over_a_wider_write_claim() {
+        // The configuration brings the projects directory back
+        // writable and the sibling inside it read-only. The
+        // read-only bind must win in a live sandbox, not merely
+        // order after the write in the arguments: the other way
+        // round, the wider writable bind would shadow it and the
+        // sibling would stay writable.
+        let Some(bwrap) = live_probe() else {
+            return;
+        };
+
+        let root = std::env::temp_dir()
+            .join(format!(
+                "nanosuit-sandbox-read-write-live-{}",
+                std::process::id()
+            ))
+            .join("home");
+        let sibling = root.join("projects").join("sibling");
+        let project_path = root.join("projects").join("nanosuit");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::create_dir_all(&project_path).unwrap();
+
+        // The scratchpad leaf and the data directory must exist on
+        // the host for their binds.
+        let project = Project::new(&project_path, None);
+        prepare_scratch(&scratch_leaf(&project)).expect("scratch leaf");
+        let _data_dir = Directory::create(project.data_dir()).expect("data dir");
+
+        // The read claim is narrower than the write claim; the
+        // read-only bind must still win.
+        let config = config::Sandbox {
+            read: vec![sibling.clone()],
+            write: vec![root.join("projects")],
+            ..Default::default()
+        };
+
+        let mut args = bwrap_args(&config, &project, Some(&root), &exe());
+        args.truncate(args.len() - 2); // Drop the `--` and the executable.
+        let probe = format!(
+            "touch {sib}/scratch 2>/dev/null && echo SIBLING_WRITABLE || echo SIBLING_READONLY; \
+             touch {p}/scratch 2>/dev/null && echo PROJECT_WRITABLE || echo PROJECT_READONLY",
+            sib = sibling.display(),
+            p = project_path.display(),
+        );
+        args.extend([
+            OsString::from("--"),
+            OsString::from("sh"),
+            OsString::from("-c"),
+            OsString::from(&probe),
+        ]);
+
+        let output = match std::process::Command::new(&bwrap).args(&args).output() {
+            // A spawn failure is an environment problem, not a
+            // policy one; skip.
+            Err(_) => return,
+            Ok(output) => output,
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !output.status.success() {
+            // Same: a nested sandbox that cannot start — a device
+            // or namespace limit — is an environment problem.
+            return;
+        }
+
+        assert!(stdout.contains("SIBLING_READONLY"), "{stdout}");
+        assert!(stdout.contains("PROJECT_WRITABLE"), "{stdout}");
     }
 
     #[test]
@@ -1530,9 +1753,9 @@ mod tests {
         let project_bind = args
             .windows(3)
             .position(|window| window[0] == "--bind" && window[1] == dir && window[2] == dir);
-        let local_bind = args.windows(3).position(|window| {
-            window[0] == "--ro-bind" && window[1] == file && window[2] == file
-        });
+        let local_bind = args
+            .windows(3)
+            .position(|window| window[0] == "--ro-bind" && window[1] == file && window[2] == file);
 
         // The read-only bind must layer over the project's writable
         // bind: bubblewrap mounts in argument order, so an earlier
@@ -1544,6 +1767,58 @@ mod tests {
         assert!(
             local_bind > project_bind,
             "the local configuration bind at {local_bind} must follow the project bind at {project_bind}"
+        );
+    }
+
+    #[test]
+    fn the_local_configuration_file_is_bound_read_only_after_a_wider_write() {
+        // A `write` entry naming the project's parent directory
+        // brings the whole tree back writable; a read-only bind of
+        // the local configuration that preceded it would be
+        // shadowed by the later mount, and the file would stay
+        // writable. A scratch directory, so the assertion does not
+        // depend on the machine it runs on.
+        let root = std::env::temp_dir()
+            .join(format!(
+                "nanosuit-sandbox-local-shadow-{}",
+                std::process::id()
+            ))
+            .join("home");
+        let projects = root.join("projects");
+        let dir = projects.join("nanosuit");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".nanosuit.toml"), "").unwrap();
+
+        let project = Project::new(dir.as_path(), Some(root.clone()));
+        let projects = projects.to_string_lossy().into_owned();
+        let file = Config::local_file(&project).to_string_lossy().into_owned();
+
+        // The projects directory comes back writable only because
+        // the configuration names it.
+        let config = config::Sandbox {
+            write: vec![root.join("projects")],
+            ..Default::default()
+        };
+
+        let args = rendered(&bwrap_args(&config, &project, Some(&root), &exe()));
+
+        let write_bind = args.windows(3).position(|window| {
+            window[0] == "--bind" && window[1] == projects && window[2] == projects
+        });
+        let local_bind = args
+            .windows(3)
+            .position(|window| window[0] == "--ro-bind" && window[1] == file && window[2] == file);
+
+        // The read-only bind must layer over the wider writable
+        // bind: bubblewrap mounts in argument order, so an earlier
+        // bind would be shadowed and the file would stay writable.
+        let (Some(write_bind), Some(local_bind)) = (write_bind, local_bind) else {
+            panic!("the projects directory or the local configuration is not bound: {args:?}");
+        };
+
+        assert!(
+            local_bind > write_bind,
+            "the local configuration bind at {local_bind} must follow the projects bind at {write_bind}"
         );
     }
 }

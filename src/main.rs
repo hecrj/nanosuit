@@ -296,6 +296,10 @@ impl Nanosuit {
             Message::Send => {
                 let message = self.input.text();
 
+                if message.trim().is_empty() {
+                    return Task::none();
+                }
+
                 self.input = text_editor::Content::new();
                 self.messages.push(Item::User(Markdown::new(&message)));
 

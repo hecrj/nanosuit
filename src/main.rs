@@ -475,14 +475,15 @@ impl Nanosuit {
 
                 let _ = self.tasks.remove(&Work::Tool(id));
 
-                if !matches!(tool.status, item::Status::Running { .. }) {
+                let item::Status::Running { logs } = &mut tool.status else {
                     return Task::none();
-                }
+                };
 
                 tool.status = match result {
                     Ok(output) => item::Status::Success { output },
                     Err(error) => item::Status::Error {
-                        output: error.to_string(),
+                        error: error.to_string(),
+                        output: tool::Output::from_iter(std::mem::take(logs)),
                     },
                 };
 
@@ -801,9 +802,11 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
 
         for message in &mut self.messages {
             if let Item::Tool(tool) = message
-                && matches!(tool.status, item::Status::Running { .. })
+                && let item::Status::Running { logs } = &mut tool.status
             {
-                tool.status = item::Status::Aborted;
+                tool.status = item::Status::Aborted {
+                    output: tool::Output::from_iter(std::mem::take(logs)),
+                };
             }
         }
 

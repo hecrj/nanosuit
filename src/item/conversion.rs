@@ -85,9 +85,9 @@ impl Status {
     pub fn from_session(status: session::Status) -> Self {
         match status {
             session::Status::Success { output } => Self::Success { output },
-            session::Status::Error { output } => Self::Error { output },
+            session::Status::Error { error, output } => Self::Error { error, output },
             session::Status::Invalid => Self::Invalid,
-            session::Status::Aborted => Self::Aborted,
+            session::Status::Aborted { output } => Self::Aborted { output },
         }
     }
 
@@ -96,14 +96,19 @@ impl Status {
             Self::Success { output } => session::Status::Success {
                 output: output.clone(),
             },
-            Self::Error { output } => session::Status::Error {
+            Self::Error { error, output } => session::Status::Error {
+                error: error.clone(),
                 output: output.clone(),
             },
             Self::Invalid => session::Status::Invalid,
-            Self::Aborted => session::Status::Aborted,
+            Self::Aborted { output } => session::Status::Aborted {
+                output: output.clone(),
+            },
             Self::Running { .. } => {
                 log::warn!("running tool is being saved!");
-                session::Status::Aborted
+                session::Status::Aborted {
+                    output: tool::Output::new(),
+                }
             }
         }
     }

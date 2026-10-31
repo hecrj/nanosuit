@@ -245,6 +245,30 @@ impl std::fmt::Display for Output {
     }
 }
 
+impl FromIterator<String> for Output {
+    fn from_iter<T: IntoIterator<Item = String>>(lines: T) -> Self {
+        let mut output = Self::new();
+
+        for line in lines {
+            output.push(line);
+        }
+
+        output
+    }
+}
+
+impl<'a> FromIterator<&'a str> for Output {
+    fn from_iter<T: IntoIterator<Item = &'a str>>(lines: T) -> Self {
+        let mut output = Self::new();
+
+        for line in lines {
+            output.push(line.to_owned());
+        }
+
+        output
+    }
+}
+
 /// Truncates `line` to at most `budget` bytes, marking the dropped
 /// bytes with a notice in the bracket convention.
 fn truncate(line: &str, budget: usize) -> String {

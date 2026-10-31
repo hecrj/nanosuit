@@ -105,9 +105,9 @@ impl Item {
                                 color: match &tool.status {
                                     Status::Running { .. } => Some(theme.seed().warning),
                                     Status::Success { .. } => None,
-                                    Status::Error { .. } | Status::Invalid | Status::Aborted => {
-                                        Some(theme.seed().danger)
-                                    }
+                                    Status::Error { .. }
+                                    | Status::Aborted { .. }
+                                    | Status::Invalid => Some(theme.seed().danger),
                                 },
                                 selection: None,
                             },
@@ -153,55 +153,22 @@ impl Item {
                             .boxed(),
                         ),
                         Status::Success { output } if output.lines() > 0 => {
-                            /// The first and last lines a long finished output
-                            /// keeps; the middle is elided
-                            const HEAD: usize = 2;
-                            const TAIL: usize = 3;
-
-                            fn line(line: &str) -> Text<'_> {
-                                text(&line[..line.floor_char_boundary(200)])
-                                    .wrapping(text::Wrapping::None)
-                                    .ellipsis(text::Ellipsis::End)
-                                    .size(font::SMALL)
-                            }
-
-                            let total = output.lines();
-
-                            Some(
-                                if total > HEAD + TAIL {
-                                    let elided = total - HEAD - TAIL;
-
-                                    let marker = match elided {
-                                        1 => "... 1 line elided".to_owned(),
-                                        elided => {
-                                            format!(
-                                                "... {} lines elided",
-                                                locale::thousands(elided as u64)
-                                            )
-                                        }
-                                    };
-
-                                    column(
-                                        output
-                                            .head(HEAD)
-                                            .map(line)
-                                            .chain([text(marker)
-                                                .size(font::SMALL)
-                                                .style(text::secondary)])
-                                            .chain(output.tail(TAIL).map(line)),
-                                    )
-                                    .spacing(5)
-                                } else {
-                                    column(output.all().map(line))
-                                }
+                            Some(truncate(output).boxed())
+                        }
+                        Status::Error { error, output } if output.lines() > 0 => Some(
+                            column![truncate(output), text!("[{error}]")]
                                 .spacing(5)
                                 .boxed(),
-                            )
-                        }
+                        ),
+                        Status::Aborted { output } if output.lines() > 0 => Some(
+                            column![truncate(output), text("[execution aborted]")]
+                                .spacing(5)
+                                .boxed(),
+                        ),
                         Status::Success { .. }
                         | Status::Error { .. }
-                        | Status::Invalid
-                        | Status::Aborted => tool.status.content().map(|content| {
+                        | Status::Aborted { .. }
+                        | Status::Invalid => tool.status.content().map(|content| {
                             let trimmed = content.trim();
 
                             text(if trimmed.is_empty() {
@@ -224,9 +191,9 @@ impl Item {
                                 let color = match tool.status {
                                     Status::Running { .. } => palette.warning,
                                     Status::Success { .. } => palette.success.scale_alpha(0.5),
-                                    Status::Invalid | Status::Aborted | Status::Error { .. } => {
-                                        palette.danger
-                                    }
+                                    Status::Invalid
+                                    | Status::Aborted { .. }
+                                    | Status::Error { .. } => palette.danger,
                                 };
 
                                 let mut style = container::dark(theme);
@@ -337,9 +304,9 @@ pub struct ToolRun {
 pub enum Status {
     Running { logs: Vec<String> },
     Success { output: tool::Output },
-    Error { output: String },
+    Error { error: String, output: tool::Output },
+    Aborted { output: tool::Output },
     Invalid,
-    Aborted,
 }
 
 impl Status {
@@ -347,9 +314,9 @@ impl Status {
         match self {
             Status::Running { .. } => None, // Never send intermediate progress
             Status::Success { output } => Some(output.to_string()),
-            Status::Error { output } => Some(output.clone()),
+            Status::Error { error, output } => Some(format!("{output}\n[{error}]")),
+            Status::Aborted { output } => Some(format!("{output}\n[execution aborted]")),
             Status::Invalid => Some("[invalid tool call]".to_owned()),
-            Status::Aborted => Some("[execution aborted]".to_owned()),
         }
     }
 }
@@ -454,4 +421,42 @@ pub fn summary(theme: &Theme) -> container::Style {
         border: border::rounded(5),
         ..container::transparent(theme)
     }
+}
+
+pub fn truncate(output: &tool::Output) -> impl Widget<Message> {
+    /// The first and last lines a long finished output
+    /// keeps; the middle is elided
+    const HEAD: usize = 10;
+    const TAIL: usize = 20;
+
+    fn line(line: &str) -> Text<'_> {
+        text(&line[..line.floor_char_boundary(200)])
+            .wrapping(text::Wrapping::None)
+            .ellipsis(text::Ellipsis::End)
+            .size(font::SMALL)
+    }
+
+    let total = output.lines();
+
+    if total > HEAD + TAIL {
+        let elided = total - HEAD - TAIL;
+
+        let marker = match elided {
+            1 => "... 1 line elided".to_owned(),
+            elided => {
+                format!("... {} lines elided", locale::thousands(elided as u64))
+            }
+        };
+
+        column(
+            output
+                .head(HEAD)
+                .map(line)
+                .chain([text(marker).size(font::SMALL).style(text::secondary)])
+                .chain(output.tail(TAIL).map(line)),
+        )
+    } else {
+        column(output.all().map(line))
+    }
+    .spacing(5)
 }

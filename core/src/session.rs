@@ -236,7 +236,9 @@ impl Session {
         for call in missing {
             self.items.push(Item::Tool(ToolRun {
                 call,
-                status: Status::Aborted,
+                status: Status::Aborted {
+                    output: Output::new(),
+                },
             }));
         }
     }
@@ -530,9 +532,9 @@ impl ToolRun {
 #[derive(Debug, Clone)]
 pub enum Status {
     Success { output: Output },
-    Error { output: String },
+    Error { error: String, output: Output },
     Invalid,
-    Aborted,
+    Aborted { output: Output },
 }
 
 impl Status {
@@ -541,9 +543,12 @@ impl Status {
 
         let (type_, status) = match self {
             Status::Success { output } => ("success", map([("output", output.encode())])),
-            Status::Error { output } => ("error", map([("error", string(output))])),
+            Status::Error { error, output } => (
+                "error",
+                map([("error", string(error)), ("output", output.encode())]),
+            ),
             Status::Invalid => ("invalid", map([])),
-            Status::Aborted => ("aborted", map([])),
+            Status::Aborted { output } => ("aborted", map([("output", output.encode())])),
         };
 
         status.tag("status", type_)
@@ -559,10 +564,17 @@ impl Status {
                 output: fields.required("output", Output::decode)?,
             }),
             "error" => Ok(Self::Error {
-                output: fields.required("error", string)?,
+                error: fields.required("error", string)?,
+                output: fields
+                    .optional("output", Output::decode)?
+                    .unwrap_or_default(),
             }),
             "invalid" => Ok(Self::Invalid),
-            "aborted" => Ok(Self::Aborted),
+            "aborted" => Ok(Self::Aborted {
+                output: fields
+                    .optional("output", Output::decode)?
+                    .unwrap_or_default(),
+            }),
             other => Err(decoder::Error::custom(format!("invalid status: {other}"))),
         }
     }
@@ -826,19 +838,18 @@ mod tests {
 
     #[test]
     fn tool_items_roundtrip_each_status() {
-        let mut output = Output::new();
-        output.push("line 1".to_owned());
-        output.push("line 2".to_owned());
-
         for status in [
             Status::Success {
-                output: output.clone(),
+                output: Output::from_iter(["line 1", "line 2"]),
             },
             Status::Error {
-                output: "boom".to_owned(),
+                output: Output::from_iter(["line 1", "line 2"]),
+                error: "boom".to_owned(),
             },
             Status::Invalid,
-            Status::Aborted,
+            Status::Aborted {
+                output: Output::from_iter(["line 1", "line 2"]),
+            },
         ] {
             let decoded = roundtrip(Frame {
                 event: Event::ItemAdded(Item::Tool(ToolRun {
@@ -859,10 +870,14 @@ mod tests {
             assert_eq!(run.call.arguments, r#"{"path": "Cargo.toml"}"#);
 
             match run.status {
-                Status::Success { output } => assert_eq!(output.to_string(), "line 1\nline 2"),
-                Status::Error { output } => assert_eq!(output, "boom"),
+                Status::Success { output } | Status::Aborted { output } => {
+                    assert_eq!(output.to_string(), "line 1\nline 2")
+                }
+                Status::Error { error, output } => {
+                    assert_eq!(output.to_string(), "line 1\nline 2");
+                    assert_eq!(error, "boom");
+                }
                 Status::Invalid => {}
-                Status::Aborted => {}
             }
         }
     }
@@ -1099,10 +1114,10 @@ mod tests {
         assert_eq!(first.call.id.as_str(), "call_a");
         assert_eq!(first.call.name, "bash");
         assert_eq!(first.call.arguments, r#"{"command": "cargo build"}"#);
-        assert!(matches!(first.status, Status::Aborted));
+        assert!(matches!(first.status, Status::Aborted { .. }));
 
         assert_eq!(second.call.id.as_str(), "call_b");
-        assert!(matches!(second.status, Status::Aborted));
+        assert!(matches!(second.status, Status::Aborted { .. }));
     }
 
     #[test]
@@ -1164,7 +1179,7 @@ mod tests {
         assert_eq!(session.items.len(), 6);
         assert!(matches!(
             session.items.last(),
-            Some(Item::Tool(tool)) if matches!(tool.status, Status::Aborted)
+            Some(Item::Tool(tool)) if matches!(tool.status, Status::Aborted { .. })
         ));
     }
 
@@ -1212,7 +1227,7 @@ mod tests {
         assert!(matches!(settled.status, Status::Success { .. }));
         assert_eq!(settled.call.id.as_str(), "call_a");
         assert_eq!(answered.call.id.as_str(), "call_b");
-        assert!(matches!(answered.status, Status::Aborted));
+        assert!(matches!(answered.status, Status::Aborted { .. }));
     }
 
     #[test]

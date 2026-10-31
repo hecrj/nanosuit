@@ -381,7 +381,7 @@ impl Sequence {
 
         (total > time::Duration::ZERO).then(|| {
             let rule = move || {
-                rule::horizontal(1).style(move |theme: &Theme| rule::Style {
+                rule::horizontal(2).style(move |theme: &Theme| rule::Style {
                     color: if is_active {
                         theme.seed().primary
                     } else {

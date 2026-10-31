@@ -154,6 +154,7 @@ struct Nanosuit {
     server: reason::Settings,
     tools: BTreeMap<&'static str, Tool>,
     connection: Connection,
+    state: State,
     tasks: HashMap<Work, task::Handle>,
     models: BTreeMap<model::Id, reason::Model>,
     model: Option<model::Id>,
@@ -169,6 +170,12 @@ struct Nanosuit {
 enum Mode {
     Chat,
     Review,
+}
+
+#[derive(Debug)]
+enum State {
+    Idle,
+    Working,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -195,9 +202,9 @@ enum Message {
     InputChanged(text_editor::Action),
     Send,
     ReplyProgressed(reason::Event),
-    ReplyReceived(Result<reason::Reply, reason::Error>),
+    ReplyFinished(Result<reason::Stamp, reason::Error>),
     CompactionProgressed(reason::Event),
-    CompactionReceived(Result<reason::Reply, reason::Error>),
+    CompactionReceived(Result<reason::Stamp, reason::Error>),
     ToolProgressed(reason::tool::Id, String),
     ToolFinished(reason::tool::Id, Result<tool::Output, reason::Error>),
     Item(usize, item::Message),
@@ -222,6 +229,7 @@ impl Nanosuit {
             server: server.clone(),
             tools: Tool::builtins(),
             connection: Connection::Disconnected,
+            state: State::Idle,
             tasks: HashMap::new(),
             models: BTreeMap::new(),
             model: None,
@@ -377,22 +385,23 @@ impl Nanosuit {
                     }
                 }
             }
-            Message::ReplyReceived(Ok(_reply)) => {
+            Message::ReplyFinished(Ok(stamp)) => {
                 let _ = self.tasks.remove(&Work::Completion);
 
-                let Some(Item::Assistant(reply)) = self
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|message| !matches!(message, Item::Tool(_)))
-                else {
+                if stamp == reason::Stamp::Stop {
+                    self.state = State::Idle;
+                }
+
+                let Some(reply) = self.last_reply_mut() else {
                     return Task::none();
                 };
 
-                if let Some(call) = reply.tool_calls.last().cloned() {
+                if let Some(call) = reply.tool_calls.last().cloned()
+                    && stamp != reason::Stamp::LengthExceeded
+                {
                     self.run(call)
                 } else {
-                    Task::none()
+                    self.compact().unwrap_or_default()
                 }
             }
             Message::CompactionProgressed(event) => {
@@ -425,8 +434,10 @@ impl Nanosuit {
 
                 Task::none()
             }
-            Message::CompactionReceived(Ok(_reply)) => {
+            Message::CompactionReceived(Ok(_stamp)) => {
                 let _ = self.tasks.remove(&Work::Compaction);
+
+                // TODO: Handle length exceeded (?)
 
                 let Some(Item::Compaction(compaction)) = self.messages.last_mut() else {
                     return Task::none();
@@ -437,11 +448,14 @@ impl Nanosuit {
 
                 log::trace!(
                     "compaction received: content_len={} reasoning_len={}",
-                    _reply.content.len(),
-                    _reply.reasoning.len()
+                    compaction.reply.content.raw().len(),
+                    compaction.reply.reasoning.raw().len(),
                 );
 
-                self.work()
+                match self.state {
+                    State::Idle => Task::none(),
+                    State::Working => self.work(),
+                }
             }
             Message::ToolProgressed(id, line) => {
                 let Some(tool) = self.messages.iter_mut().rev().find_map(|message| {
@@ -520,7 +534,7 @@ impl Nanosuit {
 
                 Task::none()
             }
-            Message::ReplyReceived(Err(error)) | Message::CompactionReceived(Err(error)) => {
+            Message::ReplyFinished(Err(error)) | Message::CompactionReceived(Err(error)) => {
                 self.abort();
 
                 log::error!("{error}");
@@ -613,6 +627,8 @@ impl Nanosuit {
             return Task::none();
         }
 
+        self.state = State::Working;
+
         if let Some(compact) = self.compact() {
             return compact;
         }
@@ -640,9 +656,11 @@ impl Nanosuit {
         let tools: Vec<_> = self.tools().collect();
 
         let (reply, handle) = Task::sip(
-            sipper(async move |sender| reason.reply(&model, &messages, &tools).run(sender).await),
+            sipper(async move |sender| {
+                reason.complete(&model, &messages, &tools).run(sender).await
+            }),
             Message::ReplyProgressed,
-            Message::ReplyReceived,
+            Message::ReplyFinished,
         )
         .abortable();
 
@@ -790,7 +808,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         }));
 
         let (reply, handle) = Task::sip(
-            sipper(async move |sender| reason.reply(&model, &prefix, &tools).run(sender).await),
+            sipper(async move |sender| reason.complete(&model, &prefix, &tools).run(sender).await),
             Message::CompactionProgressed,
             Message::CompactionReceived,
         )
@@ -802,6 +820,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
     }
 
     fn abort(&mut self) {
+        self.state = State::Idle;
         self.tasks.clear();
 
         for message in &mut self.messages {
@@ -1103,6 +1122,19 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             .unwrap_or_default();
 
         &self.messages[start..]
+    }
+
+    fn last_reply_mut(&mut self) -> Option<&mut item::Reply> {
+        let Some(Item::Assistant(reply)) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|message| !matches!(message, Item::Tool(_)))
+        else {
+            return None;
+        };
+
+        Some(reply)
     }
 
     fn last_compaction(&self) -> Option<&item::Compaction> {

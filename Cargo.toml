@@ -46,13 +46,13 @@ decoder.git = "https://github.com/hecrj/decoder.git"
 decoder.rev = "c2b759faa6cc49a4fd25271c7149028e6ff395c3"
 
 iced.git = "https://github.com/iced-rs/iced.git"
-iced.rev = "6a351fe6554bfaee524362968fa9402a36964725"
+iced.rev = "8ea4ad619e98ecbd874ba75ed01b9c666645089e"
 
 iced_core.git = "https://github.com/iced-rs/iced.git"
-iced_core.rev = "6a351fe6554bfaee524362968fa9402a36964725"
+iced_core.rev = "8ea4ad619e98ecbd874ba75ed01b9c666645089e"
 
 iced_widget.git = "https://github.com/iced-rs/iced.git"
-iced_widget.rev = "6a351fe6554bfaee524362968fa9402a36964725"
+iced_widget.rev = "8ea4ad619e98ecbd874ba75ed01b9c666645089e"
 
 iced_palace.git = "https://github.com/hecrj/iced_palace.git"
 iced_palace.rev = "3905891625387c8882ea730d7bda1297261855ce"

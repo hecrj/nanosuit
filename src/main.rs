@@ -19,7 +19,7 @@ use crate::item::Item;
 use crate::markdown::Markdown;
 use crate::repository::Repository;
 use crate::tool::Tool;
-use crate::widget::{arrow, collapsible, context_led, popover};
+use crate::widget::{context_led, popover};
 
 use iced::gradient;
 use iced::keyboard;
@@ -172,7 +172,7 @@ enum Mode {
     Review,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Idle,
     Working,
@@ -948,16 +948,23 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                 text_editor::Binding::from_key_press(key_press)
             });
 
-        let footer = container(column![input, self.status_bar()].spacing(10))
-            .style(|theme: &Theme| {
-                container::Style::default().background(
-                    gradient::Linear::new(0)
-                        .add_stop(0.2, theme.seed().background)
-                        .add_stop(0.8, theme.seed().background.scale_alpha(0.7))
-                        .add_stop(1.0, Color::TRANSPARENT),
-                )
-            })
-            .padding(padding::top(20).bottom(10));
+        let footer = container(column![
+            self.active_sequence()
+                .and_then(|sequence| sequence
+                    .status(&self.messages, true)
+                    .map(|status| container(status).padding(padding::bottom(10)).boxed()))
+                .unwrap_or_else(|| space().boxed()),
+            column![input, self.status_bar()].spacing(10)
+        ])
+        .style(|theme: &Theme| {
+            container::Style::default().background(
+                gradient::Linear::new(0)
+                    .add_stop(0.2, theme.seed().background)
+                    .add_stop(0.8, theme.seed().background.scale_alpha(0.7))
+                    .add_stop(1.0, Color::TRANSPARENT),
+            )
+        })
+        .padding(padding::top(20).bottom(10));
 
         if self.messages.is_empty() {
             const TITLES: &[&str] = &[
@@ -987,16 +994,25 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             scrollable(center(
                 column![
                     if self.compact {
-                        column(
-                            self.turns()
-                                .map(|turn| turn.view(&self.project, &self.messages)),
-                        )
+                        column(item::sequences(&self.messages).map(|sequence| {
+                            sequence.compact(
+                                &self.project,
+                                &self.messages,
+                                self.state == State::Working,
+                                Message::Item,
+                            )
+                        }))
                         .spacing(20)
                         .padding(padding::top(10))
                         .boxed()
                     } else {
-                        column(self.messages.iter().enumerate().map(|(i, item)| {
-                            item.view(&self.project, false).map(Message::Item.with(i))
+                        column(item::sequences(&self.messages).map(|sequence| {
+                            sequence.full(
+                                &self.project,
+                                &self.messages,
+                                self.state == State::Working,
+                                Message::Item,
+                            )
                         }))
                         .spacing(20)
                         .padding(padding::top(10))
@@ -1202,195 +1218,11 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         })
     }
 
-    fn turns(&self) -> impl Iterator<Item = Turn> {
-        let mut items = self.messages.iter().peekable();
-        let mut i = 0;
-
-        std::iter::from_fn(move || {
-            let start = i;
-
-            Some(loop {
-                let item = items.next()?;
-                i += 1;
-
-                match item {
-                    Item::User(_) | Item::Review(_) | Item::Compaction(_) => {
-                        break Turn::Standalone(start);
-                    }
-                    Item::Assistant(reply) if !reply.content.is_empty() => {
-                        break Turn::Work { start, end: i };
-                    }
-                    _ => {
-                        let next = items.peek();
-
-                        match next {
-                            None | Some(Item::User(_) | Item::Review(_) | Item::Compaction(_)) => {
-                                break Turn::Work { start, end: i };
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            })
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum Turn {
-    Standalone(usize),
-    Work { start: usize, end: usize },
-}
-
-impl Turn {
-    fn view<'a>(self, project: &'a Project, messages: &'a [Item]) -> impl Widget<Message> + 'a {
-        match self {
-            Turn::Standalone(i) => messages[i]
-                .view(project, true)
-                .map(Message::Item.with(i))
-                .boxed(),
-            Turn::Work { start, end } => {
-                let reply = if let Some(item @ Item::Assistant(reply)) = messages.get(end - 1)
-                    && !reply.content.is_empty()
-                {
-                    Some(
-                        item.view(project, true)
-                            .map(Message::Item.with(start + end)),
-                    )
-                } else {
-                    None
-                };
-
-                let items = move || {
-                    column(
-                        messages[start..end]
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, item)| {
-                                Some(match item {
-                                    Item::Assistant(reply) => column![
-                                        item::upload(reply, i == 0),
-                                        (!reply.reasoning.is_empty())
-                                            .then(|| item::reasoning(reply, true)),
-                                    ]
-                                    .spacing(10)
-                                    .map(Message::Item.with(start + i))
-                                    .boxed(),
-                                    Item::Tool(_) => item
-                                        .view(project, true)
-                                        .map(Message::Item.with(start + i))
-                                        .boxed(),
-                                    _ => return None,
-                                })
-                            }),
-                    )
-                };
-
-                let group = if start + 1 == end {
-                    items().boxed()
-                } else {
-                    let summary = summary(project, &messages[start..end]);
-
-                    collapsible(
-                        messages.len() == end && reply.is_none(),
-                        move |open| {
-                            container(
-                                text!("{}  {}", summary, arrow(open))
-                                    .size(font::SMALL)
-                                    .font(font::BOLD),
-                            )
-                            .width(Fill)
-                            .padding(10)
-                            .style(|theme| container::Style {
-                                text_color: None,
-                                ..container::bordered_box(theme)
-                            })
-                        },
-                        move || {
-                            row![
-                                rule::vertical(2).style(rule::weak),
-                                items().padding(padding::top(10)).spacing(10)
-                            ]
-                            .spacing(10)
-                            .padding(padding::left(10))
-                            .height(Shrink)
-                        },
-                    )
-                    .boxed()
-                };
-
-                column![group, reply].spacing(20).boxed()
-            }
+    fn active_sequence(&self) -> Option<item::Sequence> {
+        if self.state != State::Working {
+            return None;
         }
+
+        Some(item::Sequence::last(&self.messages))
     }
-}
-
-fn summary(project: &Project, messages: &[Item]) -> String {
-    let mut reasoning = time::Duration::ZERO;
-    let mut command = String::new();
-    let mut commands = 0;
-    let mut reads = 0;
-    let mut edits = 0;
-    let mut writes = 0;
-
-    for item in messages {
-        match item {
-            Item::Assistant(reply) if let Some(timings) = reply.timings => {
-                reasoning += timings.reasoning;
-            }
-            Item::Tool(run) => match run.call.name.as_str() {
-                "bash" => {
-                    if command.is_empty()
-                        && let Ok(state) = &run.state
-                        && let Some(title) = state.title(project)
-                    {
-                        command = title.into_owned();
-                    }
-
-                    commands += 1
-                }
-                "read" => reads += 1,
-                "edit" => edits += 1,
-                "write" => writes += 1,
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-
-    let inflect = |word: &str, count| {
-        if count == 1 {
-            word.to_owned()
-        } else {
-            format!("{word}s")
-        }
-    };
-
-    let mut summary = [
-        (commands > 0).then(|| {
-            if commands == 1 && !command.is_empty() {
-                command
-            } else {
-                format!("ran {commands} {}", inflect("command", commands))
-            }
-        }),
-        (reads > 0).then(|| format!("read {reads} {}", inflect("file", reads))),
-        (edits > 0).then(|| format!("edited {edits} {}", inflect("file", edits))),
-        (writes > 0).then(|| format!("wrote {writes} {}", inflect("file", writes))),
-        (reasoning > time::Duration::ZERO)
-            .then(|| format!("thought for {}", item::duration(reasoning))),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(", ");
-
-    if summary.is_empty() {
-        summary = "Catching up...".to_owned();
-    }
-
-    let capital = summary.ceil_char_boundary(1);
-    let c = summary[..capital].to_uppercase();
-    summary.replace_range(..capital, &c);
-    summary
 }

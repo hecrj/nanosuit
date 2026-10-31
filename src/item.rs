@@ -7,14 +7,16 @@ use crate::locale;
 use crate::markdown::{self, Markdown};
 use crate::repository;
 use crate::tool;
-use crate::widget::{self, collapsible};
+use crate::widget::{self, arrow, collapsible};
 
 use iced::border;
 use iced::padding;
 use iced::time;
 use iced::widget::operation;
-use iced::widget::{Text, center_x, column, container, progress_bar, right, row, scrollable, text};
-use iced::{Center, Fill, Fit, Font, Pixels, Task, Theme, Widget, never};
+use iced::widget::{
+    Text, center_x, column, container, progress_bar, right, row, rule, scrollable, text,
+};
+use iced::{Center, Fill, Fit, Font, Pixels, Shrink, Task, Theme, Widget, never};
 
 use function::Binary;
 
@@ -47,6 +49,23 @@ impl Item {
             Item::Review(review) => reason::Message::User(review.prompt()),
             Item::Compaction { .. } => return None,
         })
+    }
+
+    pub fn duration(&self) -> Option<time::Duration> {
+        match self {
+            Item::Assistant(reply) => {
+                let timings = reply.timings?;
+
+                Some(timings.prompt.total + timings.predicted.total)
+            }
+            Item::Tool(_) => None, // TODO!
+            Item::Compaction(compaction) => {
+                let timings = compaction.reply.timings?;
+
+                Some(timings.prompt.total + timings.predicted.total)
+            }
+            Item::User(_) | Item::Review(_) => None,
+        }
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -332,6 +351,264 @@ pub struct Compaction {
     pub is_finished: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Sequence {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Turn {
+    Standalone(usize),
+    Work { start: usize, end: usize },
+}
+
+impl Sequence {
+    pub fn last(items: &[Item]) -> Self {
+        let start = items
+            .iter()
+            .rposition(Self::is_breakpoint)
+            .unwrap_or_default();
+
+        Self {
+            start,
+            end: items.len(),
+        }
+    }
+
+    pub fn status<Message>(self, items: &[Item], is_active: bool) -> Option<impl Widget<Message>> {
+        let total = total_elapsed(&items[self.start..self.end]);
+
+        (total > time::Duration::ZERO).then(|| {
+            let rule = move || {
+                rule::horizontal(1).style(move |theme: &Theme| rule::Style {
+                    color: if is_active {
+                        theme.seed().primary
+                    } else {
+                        theme.palette().background.weakest.color
+                    },
+                    ..rule::default(theme)
+                })
+            };
+
+            row![
+                rule(),
+                if is_active {
+                    text!("Working... ({})", duration(total)).style(text::primary)
+                } else {
+                    text!("Worked for {}", duration(total)).style(text::secondary)
+                }
+                .font(font::BOLD)
+                .size(font::TINY),
+                rule()
+            ]
+            .spacing(20)
+            .align_y(Center)
+        })
+    }
+
+    pub fn compact<'a, T: Clone + 'static>(
+        self,
+        project: &'a Project,
+        items: &'a [Item],
+        is_working: bool,
+        to_message: impl Fn(usize, Message) -> T + Copy + Send + 'static,
+    ) -> impl Widget<T> + 'a {
+        let window = &items[self.start..self.end];
+        let is_active = is_working && self.end == items.len();
+
+        column![
+            column(turns(window).map(|turn| turn.view(project, window, is_active, to_message)))
+                .spacing(20),
+            if is_active {
+                None
+            } else {
+                self.status(items, false)
+            },
+        ]
+        .spacing(10)
+    }
+
+    pub fn full<'a, T: 'static>(
+        self,
+        project: &'a Project,
+        items: &'a [Item],
+        is_working: bool,
+        to_message: impl Fn(usize, Message) -> T + Copy + Send + 'static,
+    ) -> impl Widget<T> + 'a {
+        let window = &items[self.start..self.end];
+        let is_active = is_working && self.end == items.len();
+
+        column![
+            column(window.iter().enumerate().map(|(i, item)| {
+                item.view(project, false)
+                    .map(to_message.with(self.start + i))
+            }))
+            .spacing(20),
+            if is_active {
+                None
+            } else {
+                self.status(items, false)
+            },
+        ]
+        .spacing(10)
+    }
+
+    fn is_breakpoint(item: &Item) -> bool {
+        match item {
+            Item::User(_) | Item::Review(_) => true,
+            Item::Assistant(_) | Item::Tool(_) | Item::Compaction(_) => false,
+        }
+    }
+}
+
+impl Turn {
+    fn view<'a, T: Clone + 'static>(
+        self,
+        project: &'a Project,
+        messages: &'a [Item],
+        is_active: bool,
+        to_message: impl Fn(usize, Message) -> T + Copy + Send + 'static,
+    ) -> impl Widget<T> + 'a {
+        match self {
+            Turn::Standalone(i) => messages[i]
+                .view(project, true)
+                .map(to_message.with(i))
+                .boxed(),
+            Turn::Work { start, end } => {
+                let reply = if let Some(item @ Item::Assistant(reply)) = messages.get(end - 1)
+                    && !reply.content.is_empty()
+                {
+                    Some(item.view(project, true).map(to_message.with(end - 1)))
+                } else {
+                    None
+                };
+
+                let items = move || {
+                    column(
+                        messages[start..end]
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, item)| {
+                                Some(match item {
+                                    Item::Assistant(reply) => column![
+                                        upload(reply, i == 0),
+                                        (!reply.reasoning.is_empty())
+                                            .then(|| reasoning(reply, true)),
+                                    ]
+                                    .spacing(10)
+                                    .map(to_message.with(start + i))
+                                    .boxed(),
+                                    Item::Tool(_) => item
+                                        .view(project, true)
+                                        .map(to_message.with(start + i))
+                                        .boxed(),
+                                    _ => return None,
+                                })
+                            }),
+                    )
+                };
+
+                let group = if start + 1 == end {
+                    items().boxed()
+                } else {
+                    let summary = summary(project, &messages[start..end]);
+
+                    collapsible(
+                        is_active && messages.len() == end && reply.is_none(),
+                        move |open| {
+                            container(
+                                text!("{}  {}", summary, arrow(open))
+                                    .size(font::SMALL)
+                                    .font(font::BOLD),
+                            )
+                            .width(Fill)
+                            .padding(10)
+                            .style(|theme| container::Style {
+                                text_color: None,
+                                ..container::bordered_box(theme)
+                            })
+                        },
+                        move || {
+                            row![
+                                rule::vertical(2).style(rule::weak),
+                                items().padding(padding::top(10)).spacing(10)
+                            ]
+                            .spacing(10)
+                            .padding(padding::left(10))
+                            .height(Shrink)
+                        },
+                    )
+                    .boxed()
+                };
+
+                column![group, reply].spacing(20).boxed()
+            }
+        }
+    }
+}
+
+pub fn sequences(items: &[Item]) -> impl Iterator<Item = Sequence> {
+    let mut items = items.iter().peekable();
+    let mut end = 0;
+
+    std::iter::from_fn(move || {
+        let start = end;
+
+        Some(loop {
+            let item = items.next()?;
+            end += 1;
+
+            if Sequence::is_breakpoint(item) {
+                break Sequence { start, end };
+            } else {
+                let next = items.peek().copied();
+
+                if next.is_none_or(Sequence::is_breakpoint) {
+                    break Sequence { start, end };
+                }
+            }
+        })
+    })
+}
+
+pub fn turns(items: &[Item]) -> impl Iterator<Item = Turn> {
+    let mut items = items.iter().peekable();
+    let mut i = 0;
+
+    std::iter::from_fn(move || {
+        let start = i;
+
+        Some(loop {
+            let item = items.next()?;
+            i += 1;
+
+            match item {
+                Item::User(_) | Item::Review(_) | Item::Compaction(_) => {
+                    break Turn::Standalone(start);
+                }
+                Item::Assistant(reply) if !reply.content.is_empty() => {
+                    break Turn::Work { start, end: i };
+                }
+                Item::Assistant(_) | Item::Tool(_) => {
+                    let next = items.peek();
+
+                    match next {
+                        None | Some(Item::User(_) | Item::Review(_) | Item::Compaction(_)) => {
+                            break Turn::Work { start, end: i };
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+    })
+}
+
+pub fn total_elapsed<'a>(items: impl IntoIterator<Item = &'a Item>) -> time::Duration {
+    items.into_iter().filter_map(Item::duration).sum()
+}
+
 pub fn duration(duration: time::Duration) -> String {
     let seconds = duration.as_secs_f64();
 
@@ -350,6 +627,75 @@ pub fn duration(duration: time::Duration) -> String {
             format!("{minutes}m {seconds}s")
         }
     }
+}
+
+pub fn summary(project: &Project, messages: &[Item]) -> String {
+    let mut reasoning = time::Duration::ZERO;
+    let mut command = String::new();
+    let mut commands = 0;
+    let mut reads = 0;
+    let mut edits = 0;
+    let mut writes = 0;
+
+    for item in messages {
+        match item {
+            Item::Assistant(reply) if let Some(timings) = reply.timings => {
+                reasoning += timings.reasoning;
+            }
+            Item::Tool(run) => match run.call.name.as_str() {
+                "bash" => {
+                    if command.is_empty()
+                        && let Ok(state) = &run.state
+                        && let Some(title) = state.title(project)
+                    {
+                        command = title.into_owned();
+                    }
+
+                    commands += 1
+                }
+                "read" => reads += 1,
+                "edit" => edits += 1,
+                "write" => writes += 1,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    let inflect = |word: &str, count| {
+        if count == 1 {
+            word.to_owned()
+        } else {
+            format!("{word}s")
+        }
+    };
+
+    let mut summary = [
+        (commands > 0).then(|| {
+            if commands == 1 && !command.is_empty() {
+                command
+            } else {
+                format!("ran {commands} {}", inflect("command", commands))
+            }
+        }),
+        (reads > 0).then(|| format!("read {reads} {}", inflect("file", reads))),
+        (edits > 0).then(|| format!("edited {edits} {}", inflect("file", edits))),
+        (writes > 0).then(|| format!("wrote {writes} {}", inflect("file", writes))),
+        (reasoning > time::Duration::ZERO).then(|| format!("thought for {}", duration(reasoning))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ");
+
+    if summary.is_empty() {
+        summary = "Catching up...".to_owned();
+    }
+
+    let capital = summary.ceil_char_boundary(1);
+    let c = summary[..capital].to_uppercase();
+    summary.replace_range(..capital, &c);
+    summary
 }
 
 pub fn upload(reply: &Reply, force: bool) -> Option<impl Widget<Message>> {
@@ -410,14 +756,14 @@ pub fn reasoning(reply: &Reply, compact: bool) -> impl Widget<Message> {
                     .on_scroll(widget::snap.with(operation::Animation::Instant)),
                 )
                 .padding(10)
-                .style(summary),
+                .style(group),
             )
             .padding(padding::top(5))
         },
     ))
 }
 
-pub fn summary(theme: &Theme) -> container::Style {
+fn group(theme: &Theme) -> container::Style {
     container::Style {
         text_color: Some(theme.palette().secondary.strong.color),
         background: Some(theme.palette().background.weakest.color.into()),

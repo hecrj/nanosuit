@@ -156,14 +156,17 @@ impl Item {
                             Some(truncate(output).boxed())
                         }
                         Status::Error { error, output } if output.lines() > 0 => Some(
-                            column![truncate(output), text!("[{error}]")]
+                            column![truncate(output), text!("[{error}]").size(font::SMALL)]
                                 .spacing(5)
                                 .boxed(),
                         ),
                         Status::Aborted { output } if output.lines() > 0 => Some(
-                            column![truncate(output), text("[execution aborted]")]
-                                .spacing(5)
-                                .boxed(),
+                            column![
+                                truncate(output),
+                                text("[execution aborted]").size(font::SMALL)
+                            ]
+                            .spacing(5)
+                            .boxed(),
                         ),
                         Status::Success { .. }
                         | Status::Error { .. }

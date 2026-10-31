@@ -2,9 +2,10 @@ use crate::font;
 use crate::locale;
 
 use iced::border;
+use iced::theme;
 use iced::widget::operation;
-use iced::widget::{self, button, column, container, scrollable, text};
-use iced::{Theme, Widget};
+use iced::widget::{self, button, column, container, scrollable, stack, text};
+use iced::{Color, Fill, Theme, Widget};
 use iced_palace::widget::capsule;
 
 pub fn snap<Message>(
@@ -59,7 +60,15 @@ pub fn context_led<Message: 'static>(
     use std::cell::RefCell;
     use std::f32::consts::{FRAC_PI_2, PI};
 
-    const SIZE: f32 = 14.0;
+    const SIZE: f32 = 18.0;
+
+    fn color(palette: &theme::Palette, usage: f32) -> Color {
+        match usage {
+            0.0..0.8 => palette.primary.base.color,
+            0.8..0.9 => palette.warning.base.color,
+            _ => palette.danger.base.color,
+        }
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
     struct Led {
@@ -84,7 +93,7 @@ pub fn context_led<Message: 'static>(
             bounds: Rectangle,
             _cursor: mouse::Cursor,
         ) -> Vec<canvas::Geometry> {
-            const STROKE_WIDTH: f32 = 2.0;
+            const STROKE_WIDTH: f32 = 1.0;
 
             if *state.last.borrow() != *self {
                 *state.last.borrow_mut() = *self;
@@ -128,11 +137,7 @@ pub fn context_led<Message: 'static>(
                     frame.stroke(
                         &arc,
                         canvas::Stroke {
-                            style: canvas::Style::Solid(match usage {
-                                0.0..0.8 => palette.primary.base.color,
-                                0.8..0.9 => palette.warning.base.color,
-                                _ => palette.danger.base.color,
-                            }),
+                            style: canvas::Style::Solid(color(palette, usage)),
                             width: STROKE_WIDTH,
                             line_cap: canvas::LineCap::Square,
                             ..canvas::Stroke::default()
@@ -155,10 +160,22 @@ pub fn context_led<Message: 'static>(
     match (context_size, timings) {
         (Some(context_size), Some(timings)) => {
             let tokens = timings.total_tokens();
-            let percent = tokens as f32 / context_size as f32 * 100.0;
+            let usage = tokens as f32 / context_size as f32;
+            let percent = usage * 100.0;
 
             tooltip(
-                led,
+                stack![
+                    led,
+                    text!("{percent:.0}")
+                        .size(font::NANO)
+                        .width(Fill)
+                        .height(Fill)
+                        .center()
+                        .style(move |theme: &Theme| text::Style {
+                            color: Some(color(theme.palette(), usage)),
+                            selection: None,
+                        })
+                ],
                 container(
                     text!(
                         "{} / {} ({percent:.1}%)",

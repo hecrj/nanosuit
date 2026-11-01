@@ -23,10 +23,7 @@ pub fn snap<Message>(
 
     if matches!(
         scroll.source,
-        scrollable::Source::Scrollbar
-            | scrollable::Source::AutoScroll
-            | scrollable::Source::Operation
-            | scrollable::Source::Wheel
+        scrollable::Source::Scrollbar | scrollable::Source::AutoScroll | scrollable::Source::Wheel
     ) {
         return scrollable::Action::None;
     }

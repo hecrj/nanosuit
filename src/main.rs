@@ -261,7 +261,6 @@ impl Nanosuit {
                     boot
                 },
                 load_repository.map(Message::Repository),
-                operation::focus("input"),
             ]),
         )
     }
@@ -332,6 +331,7 @@ impl Nanosuit {
                 Task::batch([
                     work,
                     operation::scrollable::snap_to_end("scroll", operation::Animation::Auto),
+                    operation::focus("input"),
                 ])
             }
             Message::ReplyProgressed(event) => {

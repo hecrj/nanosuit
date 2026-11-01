@@ -25,7 +25,7 @@ use iced::gradient;
 use iced::keyboard;
 use iced::padding;
 use iced::task;
-use iced::time;
+use iced::time::{Duration, Instant, every, milliseconds, seconds};
 use iced::widget::operation;
 use iced::widget::{
     center, column, container, row, rule, scrollable, space, sticky, text, text_editor, toggler,
@@ -148,6 +148,7 @@ fn main() -> Result<(), iced::Error> {
 }
 
 struct Nanosuit {
+    now: Instant,
     project: Project,
     session: session::File,
     repository: Repository,
@@ -211,6 +212,7 @@ enum Message {
     Abort,
     Repository(repository::Message),
     ToggleCompact(bool),
+    Tick,
 }
 
 impl Nanosuit {
@@ -223,6 +225,7 @@ impl Nanosuit {
         let (repository, load_repository) = repository::Repository::new(project.clone());
 
         let mut nanosuit = Self {
+            now: Instant::now(),
             project: project.clone(),
             session: session.clone(),
             repository,
@@ -263,6 +266,8 @@ impl Nanosuit {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        self.now = Instant::now();
+
         match message {
             Message::Connected(Ok((reason, models))) => {
                 self.connection = Connection::Connected(reason);
@@ -318,7 +323,7 @@ impl Nanosuit {
 
                     // Wait for a couple seconds to server slots return to idle
                     // This is necessary for proper reuse of prompt caches
-                    Task::future(tokio::time::sleep(time::seconds(2)))
+                    Task::future(tokio::time::sleep(seconds(2)))
                         .discard()
                         .chain(self.work())
                 };
@@ -470,7 +475,7 @@ impl Nanosuit {
                     return Task::none();
                 };
 
-                let item::Status::Running { logs, .. } = &mut tool.status else {
+                let tool::Status::Running { logs, .. } = &mut tool.status else {
                     return Task::none();
                 };
 
@@ -493,15 +498,18 @@ impl Nanosuit {
 
                 let _ = self.tasks.remove(&Work::Tool(id));
 
-                let item::Status::Running { logs } = &mut tool.status else {
+                let tool::Status::Running { logs, started_at } = &mut tool.status else {
                     return Task::none();
                 };
 
+                let duration = self.now.saturating_duration_since(*started_at);
+
                 tool.status = match result {
-                    Ok(output) => item::Status::Success { output },
-                    Err(error) => item::Status::Error {
+                    Ok(output) => tool::Status::Success { output, duration },
+                    Err(error) => tool::Status::Error {
                         error: error.to_string(),
                         output: tool::Output::from_iter(std::mem::take(logs)),
+                        duration,
                     },
                 };
 
@@ -583,6 +591,7 @@ impl Nanosuit {
 
                 Task::none()
             }
+            Message::Tick => Task::none(),
         }
     }
 
@@ -692,12 +701,18 @@ impl Nanosuit {
                 self.tasks
                     .insert(Work::Tool(call.id.clone()), handle.abort_on_drop());
 
-                (run, item::Status::Running { logs: Vec::new() })
+                (
+                    run,
+                    tool::Status::Running {
+                        logs: Vec::new(),
+                        started_at: Instant::now(),
+                    },
+                )
             }
-            Err(_error) => (Task::none(), item::Status::Invalid),
+            Err(_error) => (Task::none(), tool::Status::Invalid),
         };
 
-        self.messages.push(Item::Tool(item::ToolRun {
+        self.messages.push(Item::Tool(tool::Run {
             call,
             state,
             status,
@@ -825,10 +840,11 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
 
         for message in &mut self.messages {
             if let Item::Tool(tool) = message
-                && let item::Status::Running { logs } = &mut tool.status
+                && let tool::Status::Running { logs, started_at } = &mut tool.status
             {
-                tool.status = item::Status::Aborted {
+                tool.status = tool::Status::Aborted {
                     output: tool::Output::from_iter(std::mem::take(logs)),
+                    duration: self.now.saturating_duration_since(*started_at),
                 };
             }
         }
@@ -857,7 +873,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             .take_while(|(i, item)| match item {
                 Item::User(_) => true,
                 Item::Assistant(_) => i + 1 != self.messages.len() || self.tasks.is_empty(),
-                Item::Tool(tool_run) => !matches!(tool_run.status, item::Status::Running { .. }),
+                Item::Tool(tool_run) => !matches!(tool_run.status, tool::Status::Running { .. }),
                 Item::Compaction(compaction) => compaction.is_finished,
                 Item::Review(_) => true,
             })
@@ -951,7 +967,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         let footer = container(column![
             self.active_sequence()
                 .and_then(|sequence| sequence
-                    .status(&self.messages, true)
+                    .status(self.now, &self.messages, true)
                     .map(|status| container(status).padding(padding::bottom(10)).boxed()))
                 .unwrap_or_else(|| space().boxed()),
             column![input, self.status_bar()].spacing(10)
@@ -996,6 +1012,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                     if self.compact {
                         column(item::sequences(&self.messages).map(|sequence| {
                             sequence.compact(
+                                self.now,
                                 &self.project,
                                 &self.messages,
                                 self.state == State::Working,
@@ -1008,6 +1025,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                     } else {
                         column(item::sequences(&self.messages).map(|sequence| {
                             sequence.full(
+                                self.now,
                                 &self.project,
                                 &self.messages,
                                 self.state == State::Working,
@@ -1045,7 +1063,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
 
             let info = timings.map(|timings| {
                 row![
-                    (timings.prompt.token > time::Duration::ZERO).then(|| {
+                    (timings.prompt.token > Duration::ZERO).then(|| {
                         text!(
                             "{tokens_per_second:0.2}↑",
                             tokens_per_second = 1.0 / timings.prompt.token.as_secs_f64(),
@@ -1053,7 +1071,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
                         .style(text::secondary)
                         .size(font::SMALL)
                     }),
-                    (timings.predicted.token > time::Duration::ZERO).then(|| {
+                    (timings.predicted.token > Duration::ZERO).then(|| {
                         text!(
                             "↓{tokens_per_second:0.2}",
                             tokens_per_second = 1.0 / timings.predicted.token.as_secs_f64(),
@@ -1121,7 +1139,15 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        time::every(time::seconds(10)).map(|_| Message::Heartbeat)
+        let heartbeat = every(seconds(10)).map(|_| Message::Heartbeat);
+
+        let tick = if self.state == State::Working {
+            every(milliseconds(100)).map(|_| Message::Tick)
+        } else {
+            Subscription::none()
+        };
+
+        Subscription::batch([heartbeat, tick])
     }
 
     fn context_size(&self) -> Option<u64> {

@@ -3,7 +3,7 @@ use crate::git;
 use crate::{Output, Project};
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// A session's file: an opaque handle to one of the project's
 /// session files, a `.jsonl` log of items.
@@ -238,6 +238,7 @@ impl Session {
                 call,
                 status: Status::Aborted {
                     output: Output::new(),
+                    duration: Duration::ZERO,
                 },
             }));
         }
@@ -531,50 +532,83 @@ impl ToolRun {
 
 #[derive(Debug, Clone)]
 pub enum Status {
-    Success { output: Output },
-    Error { error: String, output: Output },
+    Success {
+        output: Output,
+        duration: Duration,
+    },
+    Error {
+        error: String,
+        output: Output,
+        duration: Duration,
+    },
+    Aborted {
+        output: Output,
+        duration: Duration,
+    },
     Invalid,
-    Aborted { output: Output },
 }
 
 impl Status {
     fn encode(&self) -> decoder::Map {
-        use decoder::encode::{map, string};
+        use decoder::encode::{self, map, string};
 
         let (type_, status) = match self {
-            Status::Success { output } => ("success", map([("output", output.encode())])),
-            Status::Error { error, output } => (
+            Status::Success { output, duration } => (
+                "success",
+                map([
+                    ("output", output.encode()),
+                    ("duration", encode::duration(*duration)),
+                ]),
+            ),
+            Status::Error {
+                error,
+                output,
+                duration,
+            } => (
                 "error",
-                map([("error", string(error)), ("output", output.encode())]),
+                map([
+                    ("error", string(error)),
+                    ("output", output.encode()),
+                    ("duration", encode::duration(*duration)),
+                ]),
             ),
             Status::Invalid => ("invalid", map([])),
-            Status::Aborted { output } => ("aborted", map([("output", output.encode())])),
+            Status::Aborted { output, duration } => (
+                "aborted",
+                map([
+                    ("output", output.encode()),
+                    ("duration", encode::duration(*duration)),
+                ]),
+            ),
         };
 
         status.tag("status", type_)
     }
 
     fn decode(value: decoder::Value) -> decoder::Result<Self> {
-        use decoder::decode::{map, string};
+        use decoder::decode::{duration, map, string};
 
         let mut fields = map(value)?;
 
         match fields.required("status", string)?.as_str() {
             "success" => Ok(Self::Success {
                 output: fields.required("output", Output::decode)?,
+                duration: fields.optional("duration", duration)?.unwrap_or_default(),
             }),
             "error" => Ok(Self::Error {
                 error: fields.required("error", string)?,
                 output: fields
                     .optional("output", Output::decode)?
                     .unwrap_or_default(),
+                duration: fields.optional("duration", duration)?.unwrap_or_default(),
             }),
-            "invalid" => Ok(Self::Invalid),
             "aborted" => Ok(Self::Aborted {
                 output: fields
                     .optional("output", Output::decode)?
                     .unwrap_or_default(),
+                duration: fields.optional("duration", duration)?.unwrap_or_default(),
             }),
+            "invalid" => Ok(Self::Invalid),
             other => Err(decoder::Error::custom(format!("invalid status: {other}"))),
         }
     }
@@ -841,14 +875,17 @@ mod tests {
         for status in [
             Status::Success {
                 output: Output::from_iter(["line 1", "line 2"]),
+                duration: Duration::from_millis(100),
             },
             Status::Error {
                 output: Output::from_iter(["line 1", "line 2"]),
                 error: "boom".to_owned(),
+                duration: Duration::from_millis(200),
             },
             Status::Invalid,
             Status::Aborted {
                 output: Output::from_iter(["line 1", "line 2"]),
+                duration: Duration::from_millis(300),
             },
         ] {
             let decoded = roundtrip(Frame {
@@ -870,16 +907,46 @@ mod tests {
             assert_eq!(run.call.arguments, r#"{"path": "Cargo.toml"}"#);
 
             match run.status {
-                Status::Success { output } | Status::Aborted { output } => {
-                    assert_eq!(output.to_string(), "line 1\nline 2")
+                Status::Success { output, duration } => {
+                    assert_eq!(output.to_string(), "line 1\nline 2");
+                    assert_eq!(duration, Duration::from_millis(100));
                 }
-                Status::Error { error, output } => {
+                Status::Error {
+                    error,
+                    output,
+                    duration,
+                } => {
                     assert_eq!(output.to_string(), "line 1\nline 2");
                     assert_eq!(error, "boom");
+                    assert_eq!(duration, Duration::from_millis(200));
+                }
+                Status::Aborted { output, duration } => {
+                    assert_eq!(output.to_string(), "line 1\nline 2");
+                    assert_eq!(duration, Duration::from_millis(300));
                 }
                 Status::Invalid => {}
             }
         }
+    }
+
+    #[test]
+    fn a_tool_status_written_before_the_duration_roundtrips() {
+        use decoder::encode::map;
+
+        let output = Output::from_iter(["line 1", "line 2"]);
+
+        // The frame as an earlier version wrote it: no `duration`
+        // field in the status map.
+        let value: decoder::Value = map([("output", output.encode())])
+            .tag("status", "success")
+            .into();
+
+        let status = Status::decode(value).expect("legacy status decodes");
+
+        assert!(matches!(
+            status,
+            Status::Success { duration, .. } if duration == Duration::ZERO
+        ));
     }
 
     #[test]
@@ -1132,6 +1199,7 @@ mod tests {
                     call: call_a(),
                     status: Status::Success {
                         output: Output::new(),
+                        duration: Duration::ZERO,
                     },
                 }),
             ],
@@ -1202,6 +1270,7 @@ mod tests {
                     call: call_a(),
                     status: Status::Success {
                         output: Output::new(),
+                        duration: Duration::ZERO,
                     },
                 })),
             ],

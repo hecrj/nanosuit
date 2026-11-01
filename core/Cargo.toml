@@ -28,3 +28,6 @@ nanosuit-test = { version = "0.1.0-dev", path = "../test" }
 
 tokio.version = "1"
 tokio.features = ["macros", "test-util"]
+
+[lints.clippy]
+large_enum_variant = "allow"

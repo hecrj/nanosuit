@@ -11,7 +11,7 @@ use crate::widget::{self, arrow, collapsible};
 
 use iced::border;
 use iced::padding;
-use iced::time;
+use iced::time::{Duration, Instant};
 use iced::widget::operation;
 use iced::widget::{
     Text, center_x, column, container, progress_bar, right, row, rule, scrollable, text,
@@ -23,7 +23,7 @@ use function::Binary;
 pub enum Item {
     User(Markdown),
     Assistant(Reply),
-    Tool(ToolRun),
+    Tool(tool::Run),
     Review(repository::Review),
     Compaction(Compaction),
 }
@@ -51,14 +51,14 @@ impl Item {
         })
     }
 
-    pub fn duration(&self) -> Option<time::Duration> {
+    pub fn duration(&self, now: Instant) -> Option<Duration> {
         match self {
             Item::Assistant(reply) => {
                 let timings = reply.timings?;
 
                 Some(timings.prompt.total + timings.predicted.total)
             }
-            Item::Tool(_) => None, // TODO!
+            Item::Tool(run) => Some(run.status.duration(now)),
             Item::Compaction(compaction) => {
                 let timings = compaction.reply.timings?;
 
@@ -122,11 +122,11 @@ impl Item {
                         Some(text!("{}", state.title(project)?).size(font::SMALL).style(
                             |theme: &Theme| text::Style {
                                 color: match &tool.status {
-                                    Status::Running { .. } => Some(theme.seed().warning),
-                                    Status::Success { .. } => None,
-                                    Status::Error { .. }
-                                    | Status::Aborted { .. }
-                                    | Status::Invalid => Some(theme.seed().danger),
+                                    tool::Status::Running { .. } => Some(theme.seed().warning),
+                                    tool::Status::Success { .. } => None,
+                                    tool::Status::Error { .. }
+                                    | tool::Status::Aborted { .. }
+                                    | tool::Status::Invalid => Some(theme.seed().danger),
                                 },
                                 selection: None,
                             },
@@ -153,7 +153,7 @@ impl Item {
                     };
 
                     let output = match &tool.status {
-                        Status::Running { logs, .. } => Some(
+                        tool::Status::Running { logs, .. } => Some(
                             scrollable(
                                 column(logs.iter().map(|line| {
                                     text(&line[..line.floor_char_boundary(200)])
@@ -171,15 +171,15 @@ impl Item {
                             .spacing(10)
                             .boxed(),
                         ),
-                        Status::Success { output } if output.lines() > 0 => {
+                        tool::Status::Success { output, .. } if output.lines() > 0 => {
                             Some(truncate(output).boxed())
                         }
-                        Status::Error { error, output } if output.lines() > 0 => Some(
+                        tool::Status::Error { error, output, .. } if output.lines() > 0 => Some(
                             column![truncate(output), text!("[{error}]").size(font::SMALL)]
                                 .spacing(5)
                                 .boxed(),
                         ),
-                        Status::Aborted { output } if output.lines() > 0 => Some(
+                        tool::Status::Aborted { output, .. } if output.lines() > 0 => Some(
                             column![
                                 truncate(output),
                                 text("[execution aborted]").size(font::SMALL)
@@ -187,10 +187,10 @@ impl Item {
                             .spacing(5)
                             .boxed(),
                         ),
-                        Status::Success { .. }
-                        | Status::Error { .. }
-                        | Status::Aborted { .. }
-                        | Status::Invalid => tool.status.content().map(|content| {
+                        tool::Status::Success { .. }
+                        | tool::Status::Error { .. }
+                        | tool::Status::Aborted { .. }
+                        | tool::Status::Invalid => tool.status.content().map(|content| {
                             let trimmed = content.trim();
 
                             text(if trimmed.is_empty() {
@@ -211,11 +211,13 @@ impl Item {
                                 let palette = theme.seed();
 
                                 let color = match tool.status {
-                                    Status::Running { .. } => palette.warning,
-                                    Status::Success { .. } => palette.success.scale_alpha(0.5),
-                                    Status::Invalid
-                                    | Status::Aborted { .. }
-                                    | Status::Error { .. } => palette.danger,
+                                    tool::Status::Running { .. } => palette.warning,
+                                    tool::Status::Success { .. } => {
+                                        palette.success.scale_alpha(0.5)
+                                    }
+                                    tool::Status::Invalid
+                                    | tool::Status::Aborted { .. }
+                                    | tool::Status::Error { .. } => palette.danger,
                                 };
 
                                 let mut style = container::dark(theme);
@@ -316,33 +318,6 @@ pub struct Reply {
     pub timings: Option<reason::Timings>,
 }
 
-pub struct ToolRun {
-    pub call: reason::tool::Call,
-    pub state: Result<Box<dyn tool::Call>, reason::Error>,
-    pub status: Status,
-}
-
-#[derive(Debug)]
-pub enum Status {
-    Running { logs: Vec<String> },
-    Success { output: tool::Output },
-    Error { error: String, output: tool::Output },
-    Aborted { output: tool::Output },
-    Invalid,
-}
-
-impl Status {
-    fn content(&self) -> Option<String> {
-        match self {
-            Status::Running { .. } => None, // Never send intermediate progress
-            Status::Success { output } => Some(output.to_string()),
-            Status::Error { error, output } => Some(format!("{output}\n[{error}]")),
-            Status::Aborted { output } => Some(format!("{output}\n[execution aborted]")),
-            Status::Invalid => Some("[invalid tool call]".to_owned()),
-        }
-    }
-}
-
 pub struct Compaction {
     pub reply: Reply,
     pub tokens: u64,
@@ -376,10 +351,15 @@ impl Sequence {
         }
     }
 
-    pub fn status<Message>(self, items: &[Item], is_active: bool) -> Option<impl Widget<Message>> {
-        let total = total_elapsed(&items[self.start..self.end]);
+    pub fn status<Message>(
+        self,
+        now: Instant,
+        items: &[Item],
+        is_active: bool,
+    ) -> Option<impl Widget<Message>> {
+        let total = total_elapsed(&items[self.start..self.end], now);
 
-        (total > time::Duration::ZERO).then(|| {
+        (total > Duration::ZERO).then(|| {
             let rule = move || {
                 rule::horizontal(2).style(move |theme: &Theme| rule::Style {
                     color: if is_active {
@@ -409,6 +389,7 @@ impl Sequence {
 
     pub fn compact<'a, T: Clone + 'static>(
         self,
+        now: Instant,
         project: &'a Project,
         items: &'a [Item],
         is_working: bool,
@@ -423,7 +404,7 @@ impl Sequence {
             if is_active {
                 None
             } else {
-                self.status(items, false)
+                self.status(now, items, false)
             },
         ]
         .spacing(10)
@@ -431,6 +412,7 @@ impl Sequence {
 
     pub fn full<'a, T: 'static>(
         self,
+        now: Instant,
         project: &'a Project,
         items: &'a [Item],
         is_working: bool,
@@ -448,7 +430,7 @@ impl Sequence {
             if is_active {
                 None
             } else {
-                self.status(items, false)
+                self.status(now, items, false)
             },
         ]
         .spacing(10)
@@ -605,11 +587,14 @@ pub fn turns(items: &[Item]) -> impl Iterator<Item = Turn> {
     })
 }
 
-pub fn total_elapsed<'a>(items: impl IntoIterator<Item = &'a Item>) -> time::Duration {
-    items.into_iter().filter_map(Item::duration).sum()
+pub fn total_elapsed<'a>(items: impl IntoIterator<Item = &'a Item>, now: Instant) -> Duration {
+    items
+        .into_iter()
+        .filter_map(|item| item.duration(now))
+        .sum()
 }
 
-pub fn duration(duration: time::Duration) -> String {
+pub fn duration(duration: Duration) -> String {
     let seconds = duration.as_secs_f64();
 
     if seconds < 1.0 {
@@ -630,7 +615,7 @@ pub fn duration(duration: time::Duration) -> String {
 }
 
 pub fn summary(project: &Project, messages: &[Item]) -> String {
-    let mut reasoning = time::Duration::ZERO;
+    let mut reasoning = Duration::ZERO;
     let mut command = String::new();
     let mut commands = 0;
     let mut reads = 0;
@@ -681,7 +666,7 @@ pub fn summary(project: &Project, messages: &[Item]) -> String {
         (reads > 0).then(|| format!("read {reads} {}", inflect("file", reads))),
         (edits > 0).then(|| format!("edited {edits} {}", inflect("file", edits))),
         (writes > 0).then(|| format!("wrote {writes} {}", inflect("file", writes))),
-        (reasoning > time::Duration::ZERO).then(|| format!("thought for {}", duration(reasoning))),
+        (reasoning > Duration::ZERO).then(|| format!("thought for {}", duration(reasoning))),
     ]
     .into_iter()
     .flatten()
@@ -703,7 +688,7 @@ pub fn upload(reply: &Reply, force: bool) -> Option<impl Widget<Message>> {
         || (!force
             && reply
                 .timings
-                .is_some_and(|timings| timings.prompt.total <= time::Duration::from_secs(1)))
+                .is_some_and(|timings| timings.prompt.total <= Duration::from_secs(1)))
     {
         return None;
     }

@@ -12,10 +12,13 @@ use write::Write;
 pub use crate::core::Output;
 pub use call::Call;
 
+use crate::session;
+
 use iced::{Color, color};
 use serde::de::DeserializeOwned;
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 /// The background of the tool view
 pub const BACKGROUND: Color = color!(0x111);
@@ -209,6 +212,127 @@ enum Schema {
     String,
     Integer,
     Boolean,
+}
+
+pub struct Run {
+    pub call: reason::tool::Call,
+    pub state: Result<Box<dyn Call>, reason::Error>,
+    pub status: Status,
+}
+
+#[derive(Debug, Clone)]
+pub enum Status {
+    Running {
+        logs: Vec<String>,
+        started_at: Instant,
+    },
+    Success {
+        output: Output,
+        duration: Duration,
+    },
+    Error {
+        error: String,
+        output: Output,
+        duration: Duration,
+    },
+    Aborted {
+        output: Output,
+        duration: Duration,
+    },
+    Invalid,
+}
+
+impl Run {
+    pub fn from_session(tools: &BTreeMap<&str, Tool>, tool_run: session::ToolRun) -> Self {
+        let state = match tools.get(tool_run.call.name.as_str()) {
+            Some(tool) => tool.parse(&tool_run.call.arguments),
+            None => Err(std::io::Error::other(format!(
+                "unknown tool: {name}",
+                name = tool_run.call.name
+            ))
+            .into()),
+        };
+
+        Self {
+            call: tool_run.call,
+            state,
+            status: Status::from_session(tool_run.status),
+        }
+    }
+
+    pub fn to_session(&self) -> session::ToolRun {
+        session::ToolRun {
+            call: self.call.clone(),
+            status: self.status.to_session(),
+        }
+    }
+}
+
+impl Status {
+    pub fn from_session(status: session::Status) -> Self {
+        match status {
+            session::Status::Success { output, duration } => Self::Success { output, duration },
+            session::Status::Error {
+                error,
+                output,
+                duration,
+            } => Self::Error {
+                error,
+                output,
+                duration,
+            },
+            session::Status::Aborted { output, duration } => Self::Aborted { output, duration },
+            session::Status::Invalid => Self::Invalid,
+        }
+    }
+
+    pub fn to_session(&self) -> session::Status {
+        match self.clone() {
+            Self::Success { output, duration } => session::Status::Success { output, duration },
+            Self::Error {
+                error,
+                output,
+                duration,
+            } => session::Status::Error {
+                error,
+                output,
+                duration,
+            },
+            Self::Aborted { output, duration } => session::Status::Aborted {
+                output: output.clone(),
+                duration,
+            },
+            Self::Invalid => session::Status::Invalid,
+            Self::Running { .. } => {
+                log::warn!("running tool is being saved!");
+
+                session::Status::Aborted {
+                    output: Output::new(),
+                    duration: Duration::ZERO,
+                }
+            }
+        }
+    }
+
+    pub fn content(&self) -> Option<String> {
+        match self {
+            Status::Running { .. } => None, // Never send intermediate progress
+            Status::Success { output, .. } => Some(output.to_string()),
+            Status::Error { error, output, .. } => Some(format!("{output}\n[{error}]")),
+            Status::Aborted { output, .. } => Some(format!("{output}\n[execution aborted]")),
+            Status::Invalid => Some("[invalid tool call]".to_owned()),
+        }
+    }
+
+    pub fn duration(&self, now: Instant) -> Duration {
+        match self {
+            Status::Running { started_at, .. } => now.saturating_duration_since(*started_at),
+            Status::Success { duration, .. }
+            | Status::Error { duration, .. }
+            | Status::Aborted { duration, .. } => *duration,
+            Status::Invalid => Duration::ZERO,
+        }
+    }
 }
 
 #[cfg(test)]

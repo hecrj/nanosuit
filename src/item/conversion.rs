@@ -1,6 +1,6 @@
 use crate::core::session;
 use crate::diff;
-use crate::item::{Compaction, Reply, Status, ToolRun};
+use crate::item::{Compaction, Reply};
 use crate::markdown::Markdown;
 use crate::repository;
 use crate::tool;
@@ -14,7 +14,7 @@ impl Item {
         match item {
             session::Item::User(content) => Self::User(Markdown::new(&content)),
             session::Item::Assistant(reply) => Self::Assistant(Reply::from_session(reply)),
-            session::Item::Tool(tool_run) => Self::Tool(ToolRun::from_session(tools, tool_run)),
+            session::Item::Tool(tool_run) => Self::Tool(tool::Run::from_session(tools, tool_run)),
             session::Item::Compaction(compaction) => {
                 Self::Compaction(Compaction::from_session(compaction))
             }
@@ -51,65 +51,6 @@ impl Reply {
             content: self.content.raw().to_owned(),
             tool_calls: self.tool_calls.clone(),
             timings: self.timings,
-        }
-    }
-}
-
-impl ToolRun {
-    pub fn from_session(tools: &BTreeMap<&str, Tool>, tool_run: session::ToolRun) -> Self {
-        let state = match tools.get(tool_run.call.name.as_str()) {
-            Some(tool) => tool.parse(&tool_run.call.arguments),
-            None => Err(std::io::Error::other(format!(
-                "unknown tool: {name}",
-                name = tool_run.call.name
-            ))
-            .into()),
-        };
-
-        Self {
-            call: tool_run.call,
-            state,
-            status: Status::from_session(tool_run.status),
-        }
-    }
-
-    pub fn to_session(&self) -> session::ToolRun {
-        session::ToolRun {
-            call: self.call.clone(),
-            status: self.status.to_session(),
-        }
-    }
-}
-
-impl Status {
-    pub fn from_session(status: session::Status) -> Self {
-        match status {
-            session::Status::Success { output } => Self::Success { output },
-            session::Status::Error { error, output } => Self::Error { error, output },
-            session::Status::Invalid => Self::Invalid,
-            session::Status::Aborted { output } => Self::Aborted { output },
-        }
-    }
-
-    pub fn to_session(&self) -> session::Status {
-        match self {
-            Self::Success { output } => session::Status::Success {
-                output: output.clone(),
-            },
-            Self::Error { error, output } => session::Status::Error {
-                error: error.clone(),
-                output: output.clone(),
-            },
-            Self::Invalid => session::Status::Invalid,
-            Self::Aborted { output } => session::Status::Aborted {
-                output: output.clone(),
-            },
-            Self::Running { .. } => {
-                log::warn!("running tool is being saved!");
-                session::Status::Aborted {
-                    output: tool::Output::new(),
-                }
-            }
         }
     }
 }

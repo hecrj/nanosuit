@@ -2924,7 +2924,7 @@ dependencies = [
 [[package]]
 name = "reason"
 version = "0.2.0-dev"
-source = "git+https://github.com/hecrj/reason.git?rev=ba759e4cb0e5f55b01666d9c0b1beb4fbb7715d0#ba759e4cb0e5f55b01666d9c0b1beb4fbb7715d0"
+source = "git+https://github.com/hecrj/reason.git?rev=1cce84d707a2e3009475322b48f4b1f946f8296a#1cce84d707a2e3009475322b48f4b1f946f8296a"
 dependencies = [
  "futures-util",
  "log",

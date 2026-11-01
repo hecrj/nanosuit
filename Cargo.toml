@@ -58,7 +58,7 @@ iced_palace.git = "https://github.com/hecrj/iced_palace.git"
 iced_palace.rev = "3905891625387c8882ea730d7bda1297261855ce"
 
 reason.git = "https://github.com/hecrj/reason.git"
-reason.rev = "ba759e4cb0e5f55b01666d9c0b1beb4fbb7715d0"
+reason.rev = "1cce84d707a2e3009475322b48f4b1f946f8296a"
 
 # iced.path = "../iced"
 # iced_core.path = "../iced/core"

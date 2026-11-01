@@ -961,7 +961,9 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             .placeholder("Type your query here...")
             .on_action(Message::InputChanged)
             .key_binding(|key_press| {
-                if key_press.key == keyboard::Key::Named(keyboard::key::Named::Escape) {
+                if self.state == State::Working
+                    && key_press.key == keyboard::Key::Named(keyboard::key::Named::Escape)
+                {
                     return Some(text_editor::Binding::Custom(Message::Abort));
                 }
 

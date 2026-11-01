@@ -261,6 +261,7 @@ impl Nanosuit {
                     boot
                 },
                 load_repository.map(Message::Repository),
+                operation::focus("input"),
             ]),
         )
     }

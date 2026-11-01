@@ -1,7 +1,7 @@
 use crate::Diff;
 use crate::core::Project;
 use crate::core::file;
-use crate::tool::call::{self, Call};
+use crate::tool::call::{self, Call, Gauge};
 use crate::tool::{BACKGROUND, Output};
 
 use iced::widget::{column, container, scrollable};
@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use std::borrow::Cow;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Deserialize)]
 #[serde(from = "Arguments")]
@@ -57,6 +58,13 @@ impl Call for Edit {
         Some(Cow::Owned(
             project.relative(&self.path).display().to_string(),
         ))
+    }
+
+    fn gauge(&self, _duration: Duration) -> Option<Gauge> {
+        Some(Gauge::Edit {
+            additions: self.diff.additions,
+            deletions: self.diff.deletions,
+        })
     }
 
     fn view(&self) -> Option<Element<'_, Never>> {

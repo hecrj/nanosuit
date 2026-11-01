@@ -14,7 +14,7 @@ use iced::padding;
 use iced::time::{Duration, Instant};
 use iced::widget::operation;
 use iced::widget::{
-    Text, center_x, column, container, progress_bar, right, row, rule, scrollable, text,
+    Text, center_x, column, container, progress_bar, right, row, rule, scrollable, space, text,
 };
 use iced::{Center, Fill, Fit, Font, Pixels, Shrink, Task, Theme, Widget, never};
 
@@ -78,7 +78,12 @@ impl Item {
         }
     }
 
-    pub fn view<'a>(&'a self, project: &'a Project, compact: bool) -> impl Widget<Message> + 'a {
+    pub fn view<'a>(
+        &'a self,
+        now: Instant,
+        project: &'a Project,
+        compact: bool,
+    ) -> impl Widget<Message> + 'a {
         match self {
             Item::Assistant(reply) => {
                 let reasoning = if !compact && !reply.reasoning.is_empty() {
@@ -113,13 +118,13 @@ impl Item {
                 const TOOL_LOG_LINE_HEIGHT: f32 = 18.0;
                 const MAX_TOOL_LOG_HEIGHT: f32 = TOOL_LOG_LINE_HEIGHT * 10.0 + 5.0 * 9.0; // 10 lines: 10 × 18px + 9 × 5px spacing
 
-                let header = |_open| {
+                let header = move |_open| {
                     let label = container(text(&tool.call.name).size(font::SMALL))
                         .padding([2, 5])
                         .style(container::dark);
 
                     let title = tool.state.as_ref().ok().and_then(|state| {
-                        Some(text!("{}", state.title(project)?).size(font::SMALL).style(
+                        let title = text!("{}", state.title(project)?).size(font::SMALL).style(
                             |theme: &Theme| text::Style {
                                 color: match &tool.status {
                                     tool::Status::Running { .. } => Some(theme.seed().warning),
@@ -130,7 +135,29 @@ impl Item {
                                 },
                                 selection: None,
                             },
-                        ))
+                        );
+
+                        let gauge =
+                            state
+                                .gauge(tool.status.duration(now))
+                                .map(|gauge| match gauge {
+                                    tool::call::Gauge::Duration(duration) => {
+                                        text(self::duration(duration))
+                                            .style(text::secondary)
+                                            .size(font::SMALL)
+                                            .boxed()
+                                    }
+                                    tool::call::Gauge::Edit {
+                                        additions,
+                                        deletions,
+                                    } => edit(additions, deletions).boxed(),
+                                });
+
+                        Some(
+                            row![title, space::horizontal(), gauge]
+                                .spacing(10)
+                                .align_y(Center),
+                        )
                     });
 
                     row![label, title].width(Fill).spacing(10).align_y(Center)
@@ -399,8 +426,10 @@ impl Sequence {
         let is_active = is_working && self.end == items.len();
 
         column![
-            column(turns(window).map(|turn| turn.view(project, window, is_active, to_message)))
-                .spacing(20),
+            column(
+                turns(window).map(|turn| turn.view(now, project, window, is_active, to_message))
+            )
+            .spacing(20),
             if is_active {
                 None
             } else {
@@ -423,7 +452,7 @@ impl Sequence {
 
         column![
             column(window.iter().enumerate().map(|(i, item)| {
-                item.view(project, false)
+                item.view(now, project, false)
                     .map(to_message.with(self.start + i))
             }))
             .spacing(20),
@@ -447,6 +476,7 @@ impl Sequence {
 impl Turn {
     fn view<'a, T: Clone + 'static>(
         self,
+        now: Instant,
         project: &'a Project,
         messages: &'a [Item],
         is_active: bool,
@@ -454,14 +484,14 @@ impl Turn {
     ) -> impl Widget<T> + 'a {
         match self {
             Turn::Standalone(i) => messages[i]
-                .view(project, true)
+                .view(now, project, true)
                 .map(to_message.with(i))
                 .boxed(),
             Turn::Work { start, end } => {
                 let reply = if let Some(item @ Item::Assistant(reply)) = messages.get(end - 1)
                     && !reply.content.is_empty()
                 {
-                    Some(item.view(project, true).map(to_message.with(end - 1)))
+                    Some(item.view(now, project, true).map(to_message.with(end - 1)))
                 } else {
                     None
                 };
@@ -482,7 +512,7 @@ impl Turn {
                                     .map(to_message.with(start + i))
                                     .boxed(),
                                     Item::Tool(_) => item
-                                        .view(project, true)
+                                        .view(now, project, true)
                                         .map(to_message.with(start + i))
                                         .boxed(),
                                     _ => return None,
@@ -494,22 +524,16 @@ impl Turn {
                 let group = if start + 1 == end {
                     items().boxed()
                 } else {
-                    let summary = summary(project, &messages[start..end]);
-
                     collapsible(
                         is_active && messages.len() == end && reply.is_none(),
                         move |open| {
-                            container(
-                                text!("{}  {}", summary, arrow(open))
-                                    .size(font::SMALL)
-                                    .font(font::BOLD),
-                            )
-                            .width(Fill)
-                            .padding(10)
-                            .style(|theme| container::Style {
-                                text_color: None,
-                                ..container::bordered_box(theme)
-                            })
+                            container(summary(now, project, &messages[start..end], open))
+                                .width(Fill)
+                                .padding(10)
+                                .style(|theme| container::Style {
+                                    text_color: None,
+                                    ..container::bordered_box(theme)
+                                })
                         },
                         move || {
                             row![
@@ -614,7 +638,12 @@ pub fn duration(duration: Duration) -> String {
     }
 }
 
-pub fn summary(project: &Project, messages: &[Item]) -> String {
+pub fn summary<Message: 'static>(
+    now: Instant,
+    project: &Project,
+    messages: &[Item],
+    open: bool,
+) -> impl Widget<Message> {
     let mut reasoning = Duration::ZERO;
     let mut command = String::new();
     let mut commands = 0;
@@ -622,27 +651,48 @@ pub fn summary(project: &Project, messages: &[Item]) -> String {
     let mut edits = 0;
     let mut writes = 0;
 
+    let mut tools = Duration::ZERO;
+    let mut additions = 0;
+    let mut deletions = 0;
+
     for item in messages {
         match item {
             Item::Assistant(reply) if let Some(timings) = reply.timings => {
                 reasoning += timings.reasoning;
             }
-            Item::Tool(run) => match run.call.name.as_str() {
-                "bash" => {
-                    if command.is_empty()
-                        && let Ok(state) = &run.state
-                        && let Some(title) = state.title(project)
-                    {
-                        command = title.into_owned();
-                    }
+            Item::Tool(run) => {
+                match run.call.name.as_str() {
+                    "bash" => {
+                        if command.is_empty()
+                            && let Ok(state) = &run.state
+                            && let Some(title) = state.title(project)
+                        {
+                            command = title.into_owned();
+                        }
 
-                    commands += 1
+                        commands += 1
+                    }
+                    "read" => reads += 1,
+                    "edit" => edits += 1,
+                    "write" => writes += 1,
+                    _ => {}
                 }
-                "read" => reads += 1,
-                "edit" => edits += 1,
-                "write" => writes += 1,
-                _ => {}
-            },
+
+                if let Ok(state) = &run.state
+                    && let Some(gauge) = state.gauge(run.status.duration(now))
+                {
+                    match gauge {
+                        tool::call::Gauge::Duration(duration) => tools += duration,
+                        tool::call::Gauge::Edit {
+                            additions: new_additions,
+                            deletions: new_deletions,
+                        } => {
+                            additions += new_additions;
+                            deletions += new_deletions;
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -680,10 +730,43 @@ pub fn summary(project: &Project, messages: &[Item]) -> String {
     let capital = summary.ceil_char_boundary(1);
     let c = summary[..capital].to_uppercase();
     summary.replace_range(..capital, &c);
-    summary
+
+    let summary = text!("{}  {}", summary, arrow(open))
+        .size(font::SMALL)
+        .font(font::BOLD);
+
+    let gauge = row![
+        (additions > 0 || deletions > 0).then(|| edit(additions, deletions)),
+        (tools > Duration::ZERO).then(|| text(duration(tools))
+            .size(font::SMALL)
+            .style(text::secondary)),
+    ]
+    .spacing(10);
+
+    row![summary, space::horizontal(), gauge]
+        .spacing(10)
+        .align_y(Center)
 }
 
-pub fn upload(reply: &Reply, force: bool) -> Option<impl Widget<Message>> {
+fn edit<Message>(additions: u64, deletions: u64) -> impl Widget<Message> {
+    row![
+        text!("+{additions}")
+            .style(|theme: &Theme| text::Style {
+                color: Some(theme.seed().success),
+                selection: None
+            })
+            .size(font::SMALL),
+        text!("-{deletions}")
+            .style(|theme: &Theme| text::Style {
+                color: Some(theme.seed().danger),
+                selection: None
+            })
+            .size(font::SMALL),
+    ]
+    .spacing(10)
+}
+
+fn upload(reply: &Reply, force: bool) -> Option<impl Widget<Message>> {
     if reply.prompt.total == reply.prompt.processed
         || (!force
             && reply

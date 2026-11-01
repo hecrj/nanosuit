@@ -2,7 +2,7 @@ use crate::core::Project;
 use crate::font;
 use crate::highlight;
 use crate::tool::Output;
-use crate::tool::call::{self, Call};
+use crate::tool::call::{self, Call, Gauge};
 
 use iced::widget::{column, rich_text, span, text};
 use iced::{Element, Never, Widget};
@@ -12,6 +12,7 @@ use tokio::io::AsyncBufReadExt;
 
 use std::borrow::Cow;
 use std::path::Path;
+use std::time::Duration;
 
 /// How many bytes a line of the command preview may hold before it
 /// is cut; long, single-line commands are everyday, and a command's
@@ -82,6 +83,10 @@ impl From<Arguments> for Bash {
 impl Call for Bash {
     fn title(&self, _project: &Project) -> Option<Cow<'_, str>> {
         self.title.as_deref().map(Cow::Borrowed)
+    }
+
+    fn gauge(&self, duration: Duration) -> Option<Gauge> {
+        Some(Gauge::Duration(duration))
     }
 
     fn view(&self) -> Option<Element<'_, Never>> {

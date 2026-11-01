@@ -24,6 +24,8 @@ const INLINE_DEADLINE: Duration = Duration::from_millis(10);
 #[derive(Debug, Clone)]
 pub struct Diff {
     pub lines: Arc<[Line]>,
+    pub additions: u64,
+    pub deletions: u64,
     palette: Palette,
 }
 
@@ -40,13 +42,21 @@ impl Diff {
 
         let mut old_parser = highlighter::Parser::new(&settings);
         let mut new_parser = highlighter::Parser::new(&settings);
+        let mut additions = 0;
+        let mut deletions = 0;
 
         let lines = diff
             .iter_all_inline_changes_with_options_deadline(options, deadline)
             .map(|change| {
                 let tag = match change.tag() {
-                    ChangeTag::Insert => Tag::Addition,
-                    ChangeTag::Delete => Tag::Deletion,
+                    ChangeTag::Insert => {
+                        additions += 1;
+                        Tag::Addition
+                    }
+                    ChangeTag::Delete => {
+                        deletions += 1;
+                        Tag::Deletion
+                    }
                     ChangeTag::Equal => Tag::Context,
                 };
 
@@ -74,7 +84,12 @@ impl Diff {
             })
             .collect();
 
-        Self { palette, lines }
+        Self {
+            palette,
+            lines,
+            additions,
+            deletions,
+        }
     }
 
     pub fn view(&self) -> impl Iterator<Item = impl Widget<Never>> {

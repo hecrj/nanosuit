@@ -7,24 +7,27 @@ use sipper::sipper;
 use std::borrow::Cow;
 use std::path::Path;
 use std::pin::Pin;
+use std::time::Duration;
 
 pub trait Call {
-    /// Executes the call and returns its result.
-    ///
-    /// The returned output is fed back to the model as the tool's
-    /// response. Keep tool commentary and content distinguishable: use
-    /// `Output::push_notice` for any message the tool itself generates —
-    /// diagnostics, truncation notices, confirmations — and push verbatim
-    /// content (file contents, command output) unbracketed.
     fn run(&self, project: &Path) -> Run;
 
     fn title(&self, _project: &Project) -> Option<Cow<'_, str>> {
         None
     }
 
+    fn gauge(&self, _duration: Duration) -> Option<Gauge> {
+        None
+    }
+
     fn view(&self) -> Option<Element<'_, Never>> {
         None
     }
+}
+
+pub enum Gauge {
+    Duration(Duration),
+    Edit { additions: u64, deletions: u64 },
 }
 
 pub type Output = Result<tool::Output, reason::Error>;

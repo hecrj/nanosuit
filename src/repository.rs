@@ -347,12 +347,15 @@ impl Repository {
         .size(font::SMALL);
 
         let changes = row![
-            text!("+{}", status.additions)
-                .size(font::SMALL)
-                .style(text::success),
-            text!("-{}", status.deletions)
-                .size(font::SMALL)
-                .style(text::danger),
+            (status.additions > 0 || status.deletions > 0).then(|| row![
+                text!("+{}", status.additions)
+                    .size(font::SMALL)
+                    .style(text::success),
+                text!("-{}", status.deletions)
+                    .size(font::SMALL)
+                    .style(text::danger),
+            ]
+            .spacing(5)),
             (!status.untracked.is_empty()).then(|| {
                 text!("({})", status.untracked.len())
                     .size(font::TINY)

@@ -401,7 +401,7 @@ impl Nanosuit {
                     self.state = State::Idle;
                 }
 
-                let Some(reply) = self.last_reply_mut() else {
+                let Some((_, reply)) = self.last_reply_mut() else {
                     return Task::none();
                 };
 
@@ -411,6 +411,9 @@ impl Nanosuit {
                     {
                         self.run(call)
                     } else {
+                        // Last tool call will not run
+                        let _ = reply.tool_calls.pop();
+
                         self.compact().unwrap_or_default()
                     },
                     self.save(),
@@ -848,8 +851,42 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
     }
 
     fn abort(&mut self) {
+        use std::collections::HashSet;
+
         self.state = State::Idle;
         self.tasks.clear();
+
+        let last_calls = self.last_reply_mut().map(|(i, last_reply)| {
+            (
+                i,
+                last_reply
+                    .tool_calls
+                    .iter()
+                    .map(|call| call.id.clone())
+                    .collect::<HashSet<_>>(),
+            )
+        });
+
+        if let Some((i, last_calls)) = last_calls {
+            let last_runs = self.messages[i + 1..]
+                .iter()
+                .filter_map(|item| {
+                    if let Item::Tool(run) = item {
+                        Some(run.call.id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if let Some((_, last_reply)) = self.last_reply_mut() {
+                let running = last_calls.intersection(&last_runs).collect::<HashSet<_>>();
+
+                last_reply
+                    .tool_calls
+                    .retain(|call| running.contains(&call.id));
+            }
+        }
 
         for message in &mut self.messages {
             if let Item::Tool(tool) = message
@@ -1185,17 +1222,17 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         &self.messages[start..]
     }
 
-    fn last_reply_mut(&mut self) -> Option<&mut item::Reply> {
-        let Some(Item::Assistant(reply)) = self
+    fn last_reply_mut(&mut self) -> Option<(usize, &mut item::Reply)> {
+        let Some((i, Item::Assistant(reply))) = self
             .messages
             .iter_mut()
-            .rev()
-            .find(|message| !matches!(message, Item::Tool(_)))
+            .enumerate()
+            .rfind(|(_, message)| matches!(message, Item::Assistant(_)))
         else {
             return None;
         };
 
-        Some(reply)
+        Some((i, reply))
     }
 
     fn last_compaction(&self) -> Option<&item::Compaction> {

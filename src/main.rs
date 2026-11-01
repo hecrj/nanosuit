@@ -155,6 +155,7 @@ struct Nanosuit {
     server: reason::Settings,
     tools: BTreeMap<&'static str, Tool>,
     connection: Connection,
+    instructions: String,
     state: State,
     tasks: HashMap<Work, task::Handle>,
     models: BTreeMap<model::Id, reason::Model>,
@@ -200,6 +201,7 @@ enum Message {
     Heartbeat,
     SessionLoaded(Result<Session, reason::Error>),
     SessionSaved(Result<usize, reason::Error>),
+    InstructionsRead(Result<String, reason::Error>),
     InputChanged(text_editor::Action),
     Send,
     ReplyProgressed(reason::Event),
@@ -232,6 +234,7 @@ impl Nanosuit {
             server: server.clone(),
             tools: Tool::builtins(),
             connection: Connection::Disconnected,
+            instructions: String::new(),
             state: State::Idle,
             tasks: HashMap::new(),
             models: BTreeMap::new(),
@@ -249,7 +252,7 @@ impl Nanosuit {
         let boot = {
             let load = Task::perform(Session::load(session), Message::SessionLoaded);
 
-            Task::batch([nanosuit.connect(), load])
+            Task::batch([nanosuit.connect(), nanosuit.read_instructions(), load])
         };
 
         (
@@ -298,6 +301,11 @@ impl Nanosuit {
             }
             Message::SessionSaved(Ok(last_saved)) => {
                 self.last_saved = last_saved;
+
+                Task::none()
+            }
+            Message::InstructionsRead(Ok(instructions)) => {
+                self.instructions = instructions.trim().to_owned();
 
                 Task::none()
             }
@@ -535,31 +543,6 @@ impl Nanosuit {
 
                 item.update(message).map(Message::Item.with(i))
             }
-            Message::Connected(Err(error)) | Message::ModelsListed(Err(error)) => {
-                self.connection = Connection::Disconnected;
-                self.abort();
-
-                log::debug!("{error}");
-
-                Task::none()
-            }
-            Message::ReplyFinished(Err(error)) | Message::CompactionReceived(Err(error)) => {
-                self.abort();
-
-                log::error!("{error}");
-
-                Task::none()
-            }
-            Message::SessionLoaded(Err(error)) => {
-                log::error!("session failed to load: {error}");
-
-                Task::none()
-            }
-            Message::SessionSaved(Err(error)) => {
-                log::warn!("session failed to save: {error}");
-
-                Task::none()
-            }
             Message::Repository(message) => match self.repository.update(message) {
                 repository::Action::None => Task::none(),
                 repository::Action::Run(task) => task.map(Message::Repository),
@@ -593,6 +576,36 @@ impl Nanosuit {
                 Task::none()
             }
             Message::Tick => Task::none(),
+            Message::Connected(Err(error)) | Message::ModelsListed(Err(error)) => {
+                self.connection = Connection::Disconnected;
+                self.abort();
+
+                log::debug!("{error}");
+
+                Task::none()
+            }
+            Message::ReplyFinished(Err(error)) | Message::CompactionReceived(Err(error)) => {
+                self.abort();
+
+                log::error!("{error}");
+
+                Task::none()
+            }
+            Message::SessionLoaded(Err(error)) => {
+                log::error!("session failed to load: {error}");
+
+                Task::none()
+            }
+            Message::SessionSaved(Err(error)) => {
+                log::error!("session failed to save: {error}");
+
+                Task::none()
+            }
+            Message::InstructionsRead(Err(error)) => {
+                log::error!("AGENTS.md failed to load: {error}");
+
+                Task::none()
+            }
         }
     }
 
@@ -1195,6 +1208,21 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         })
     }
 
+    fn read_instructions(&self) -> Task<Message> {
+        let instructions = self.project.join("AGENTS.md");
+
+        Task::perform(
+            async move {
+                if !tokio::fs::try_exists(&instructions).await? {
+                    return Ok(String::new());
+                }
+
+                Ok(tokio::fs::read_to_string(instructions).await?)
+            },
+            Message::InstructionsRead,
+        )
+    }
+
     /// The system prompt, the compaction summary — if any — and the
     /// most recent user message before the compaction cutoff, the
     /// opener of the turn the boundary falls in, so the model retains
@@ -1202,6 +1230,15 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
     fn opener(&self) -> impl Iterator<Item = reason::Message> {
         const SYSTEM_PROMPT: &str = "You are an expert coding assistant. \
             The user wants your help to develop a project in the current directory.";
+
+        let system_prompt = if self.instructions.is_empty() {
+            SYSTEM_PROMPT.to_owned()
+        } else {
+            format!(
+                "{SYSTEM_PROMPT}\n\nProject instructions (from AGENTS.md):\n{}",
+                self.instructions
+            )
+        };
 
         let start = self.messages.len() - self.context().len();
 
@@ -1224,7 +1261,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
             })
         });
 
-        [reason::Message::System(SYSTEM_PROMPT.to_owned())]
+        [reason::Message::System(system_prompt)]
             .into_iter()
             .chain(last_compaction)
             .chain(last_user_turn)

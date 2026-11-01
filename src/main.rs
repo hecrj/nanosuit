@@ -200,7 +200,7 @@ enum Message {
     ModelsListed(Result<Vec<reason::Model>, reason::Error>),
     Heartbeat,
     SessionLoaded(Result<Session, reason::Error>),
-    SessionSaved(Result<usize, reason::Error>),
+    SessionSaved(Result<(), reason::Error>),
     InstructionsRead(Result<String, reason::Error>),
     InputChanged(text_editor::Action),
     Send,
@@ -279,13 +279,11 @@ impl Nanosuit {
             Message::Heartbeat => {
                 self.heartbeats += 1;
 
-                let reconnect = match &self.connection {
+                match &self.connection {
                     Connection::Disconnected => self.connect(),
                     Connection::Connected(_) => self.list_models(),
                     Connection::Connecting => Task::none(),
-                };
-
-                Task::batch([reconnect, self.save()])
+                }
             }
             Message::ModelsListed(Ok(models)) => self.update_models(models),
             Message::SessionLoaded(Ok(session)) => {
@@ -299,11 +297,7 @@ impl Nanosuit {
 
                 operation::focus("input")
             }
-            Message::SessionSaved(Ok(last_saved)) => {
-                self.last_saved = last_saved;
-
-                Task::none()
-            }
+            Message::SessionSaved(Ok(())) => Task::none(),
             Message::InstructionsRead(Ok(instructions)) => {
                 self.instructions = instructions.trim().to_owned();
 
@@ -338,6 +332,7 @@ impl Nanosuit {
 
                 Task::batch([
                     work,
+                    self.save(),
                     operation::scrollable::snap_to_end("scroll", operation::Animation::Auto),
                     operation::focus("input"),
                 ])
@@ -410,13 +405,16 @@ impl Nanosuit {
                     return Task::none();
                 };
 
-                if let Some(call) = reply.tool_calls.last().cloned()
-                    && stamp != reason::Stamp::LengthExceeded
-                {
-                    self.run(call)
-                } else {
-                    self.compact().unwrap_or_default()
-                }
+                Task::batch([
+                    if let Some(call) = reply.tool_calls.last().cloned()
+                        && stamp != reason::Stamp::LengthExceeded
+                    {
+                        self.run(call)
+                    } else {
+                        self.compact().unwrap_or_default()
+                    },
+                    self.save(),
+                ])
             }
             Message::CompactionProgressed(event) => {
                 let Some(Item::Compaction(compaction)) = self.messages.last_mut() else {
@@ -467,8 +465,8 @@ impl Nanosuit {
                 );
 
                 match self.state {
-                    State::Idle => Task::none(),
-                    State::Working => self.work(),
+                    State::Idle => self.save(),
+                    State::Working => Task::batch([self.work(), self.save()]),
                 }
             }
             Message::ToolProgressed(id, line) => {
@@ -525,6 +523,7 @@ impl Nanosuit {
                 if self.tasks.is_empty() {
                     Task::batch([
                         self.work(),
+                        self.save(),
                         self.repository.status().map(Message::Repository),
                     ])
                 } else {
@@ -533,8 +532,7 @@ impl Nanosuit {
             }
             Message::Abort => {
                 self.abort();
-
-                Task::none()
+                self.save()
             }
             Message::Item(i, message) => {
                 let Some(item) = self.messages.get_mut(i) else {
@@ -556,6 +554,7 @@ impl Nanosuit {
                     Task::batch([
                         operation::scrollable::snap_to_end("scroll", operation::Animation::Instant),
                         self.work(),
+                        self.save(),
                     ])
                 }
                 repository::Action::ToggleReview => {
@@ -582,14 +581,14 @@ impl Nanosuit {
 
                 log::debug!("{error}");
 
-                Task::none()
+                self.save()
             }
             Message::ReplyFinished(Err(error)) | Message::CompactionReceived(Err(error)) => {
                 self.abort();
 
                 log::error!("{error}");
 
-                Task::none()
+                self.save()
             }
             Message::SessionLoaded(Err(error)) => {
                 log::error!("session failed to load: {error}");
@@ -878,7 +877,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         }
     }
 
-    fn save(&self) -> Task<Message> {
+    fn save(&mut self) -> Task<Message> {
         let new_events: Vec<_> = self
             .messages
             .iter()
@@ -900,13 +899,17 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         }
 
         let session = self.session.clone();
-        let new_last_saved = self.last_saved + new_events.len();
+
+        // Advance the cursor before the write completes: overlapping
+        // saves must produce disjoint diffs, or the log gains duplicate
+        // frames.
+        self.last_saved += new_events.len();
 
         Task::perform(
             async move {
-                Session::append(&session, new_events).await?;
+                let _ = Session::append(&session, new_events).await?;
 
-                Ok(new_last_saved)
+                Ok(())
             },
             Message::SessionSaved,
         )

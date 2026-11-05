@@ -124,8 +124,10 @@ impl Item {
                         .style(container::dark);
 
                     let title = tool.state.as_ref().ok().and_then(|state| {
-                        let title = text!("{}", state.title(project)?).size(font::SMALL).style(
-                            |theme: &Theme| text::Style {
+                        let title = text!("{}", state.title(project)?)
+                            .width(Fill)
+                            .size(font::SMALL)
+                            .style(|theme: &Theme| text::Style {
                                 color: match &tool.status {
                                     tool::Status::Running { .. } => Some(theme.seed().warning),
                                     tool::Status::Success { .. } => None,
@@ -134,8 +136,7 @@ impl Item {
                                     | tool::Status::Invalid => Some(theme.seed().danger),
                                 },
                                 selection: None,
-                            },
-                        );
+                            });
 
                         let gauge =
                             state
@@ -153,11 +154,7 @@ impl Item {
                                     } => edit(additions, deletions).boxed(),
                                 });
 
-                        Some(
-                            row![title, space::horizontal(), gauge]
-                                .spacing(10)
-                                .align_y(Center),
-                        )
+                        Some(row![title, gauge].spacing(10).align_y(Center))
                     });
 
                     row![label, title].width(Fill).spacing(10).align_y(Center)

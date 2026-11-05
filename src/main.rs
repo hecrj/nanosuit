@@ -766,7 +766,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
 
         let model = self.model.as_ref()?;
         let context_size = self.context_size()?;
-        let timings = self.timings()?;
+        let (timings, _prompt) = self.timings()?;
 
         let total_tokens = timings.total_tokens();
         let context_left = context_size.saturating_sub(total_tokens);
@@ -1117,7 +1117,7 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         let server = {
             let timings = self.timings();
 
-            let info = timings.map(|timings| {
+            let info = timings.map(|(timings, _prompt)| {
                 row![
                     (timings.prompt.token > Duration::ZERO).then(|| {
                         text!(
@@ -1313,11 +1313,11 @@ Reply with only the summary, under 500 words. You cannot use any tools."#;
         self.tools.values().map(Tool::to_metadata)
     }
 
-    fn timings(&self) -> Option<reason::Timings> {
+    fn timings(&self) -> Option<(reason::Timings, reason::Progress)> {
         self.context().iter().rev().find_map(|item| {
             if let Item::Assistant(reply) | Item::Compaction(item::Compaction { reply, .. }) = item
             {
-                reply.timings
+                reply.timings.zip(Some(reply.prompt))
             } else {
                 None
             }

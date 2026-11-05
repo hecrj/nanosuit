@@ -48,7 +48,7 @@ pub fn snap<Message>(
 
 pub fn context_led<Message: 'static>(
     context_size: Option<u64>,
-    timings: Option<reason::Timings>,
+    timings: Option<(reason::Timings, reason::Progress)>,
 ) -> impl Widget<Message> {
     use iced::mouse;
     use iced::widget::{canvas, tooltip};
@@ -70,7 +70,7 @@ pub fn context_led<Message: 'static>(
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
     struct Led {
         context_size: Option<u64>,
-        timings: Option<reason::Timings>,
+        timings: Option<(reason::Timings, reason::Progress)>,
     }
 
     #[derive(Default)]
@@ -111,35 +111,48 @@ pub fn context_led<Message: 'static>(
                     },
                 );
 
-                if let Some(timings) = self.timings
+                if let Some((timings, prompt)) = self.timings
                     && let Some(context_size) = self.context_size
                 {
-                    let usage = timings.total_tokens() as f32 / context_size as f32;
+                    let mut draw_arc = |usage, color| {
+                        let arc = {
+                            let mut builder = canvas::path::Builder::new();
 
-                    let arc = {
-                        let mut builder = canvas::path::Builder::new();
+                            let start = -FRAC_PI_2;
 
-                        let start = -FRAC_PI_2;
+                            builder.arc(canvas::path::Arc {
+                                center: frame.center(),
+                                radius,
+                                start_angle: Radians(start),
+                                end_angle: Radians(start + 2.0 * PI * usage),
+                            });
 
-                        builder.arc(canvas::path::Arc {
-                            center: frame.center(),
-                            radius,
-                            start_angle: Radians(start),
-                            end_angle: Radians(start + 2.0 * PI * usage),
-                        });
+                            builder.build()
+                        };
 
-                        builder.build()
+                        frame.stroke(
+                            &arc,
+                            canvas::Stroke {
+                                style: canvas::Style::Solid(color),
+                                width: STROKE_WIDTH,
+                                line_cap: canvas::LineCap::Square,
+                                ..canvas::Stroke::default()
+                            },
+                        );
                     };
 
-                    frame.stroke(
-                        &arc,
-                        canvas::Stroke {
-                            style: canvas::Style::Solid(color(palette, usage)),
-                            width: STROKE_WIDTH,
-                            line_cap: canvas::LineCap::Square,
-                            ..canvas::Stroke::default()
-                        },
-                    );
+                    let pending = prompt.total - prompt.processed;
+                    let usage = (timings.total_tokens().saturating_sub(pending)) as f32
+                        / context_size as f32;
+
+                    if pending > 0 {
+                        draw_arc(
+                            usage + pending as f32 / context_size as f32,
+                            palette.secondary.weak.color,
+                        );
+                    }
+
+                    draw_arc(usage, color(palette, usage));
                 }
             });
 
@@ -155,7 +168,7 @@ pub fn context_led<Message: 'static>(
     .height(SIZE);
 
     match (context_size, timings) {
-        (Some(context_size), Some(timings)) => {
+        (Some(context_size), Some((timings, _prompt))) => {
             let tokens = timings.total_tokens();
             let usage = tokens as f32 / context_size as f32;
             let percent = usage * 100.0;

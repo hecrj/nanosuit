@@ -368,7 +368,7 @@ impl Repository {
         .spacing(5)
         .align_y(Center);
 
-        let review = button(row![branch, changes].spacing(8))
+        let review = button(row![branch, changes].spacing(8).align_y(Center))
             .on_press(Message::ToggleReview)
             .padding([0, 2])
             .style(|theme: &Theme, status| {

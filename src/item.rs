@@ -747,18 +747,18 @@ pub fn summary<Message: 'static>(
 
 fn edit<Message>(additions: u64, deletions: u64) -> impl Widget<Message> {
     row![
-        text!("+{additions}")
+        (additions > 0).then(|| text!("+{additions}")
             .style(|theme: &Theme| text::Style {
                 color: Some(theme.seed().success),
                 selection: None
             })
-            .size(font::SMALL),
-        text!("-{deletions}")
+            .size(font::SMALL)),
+        (deletions > 0).then(|| text!("-{deletions}")
             .style(|theme: &Theme| text::Style {
                 color: Some(theme.seed().danger),
                 selection: None
             })
-            .size(font::SMALL),
+            .size(font::SMALL)),
     ]
     .spacing(10)
 }

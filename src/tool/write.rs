@@ -45,6 +45,13 @@ impl Call for Write {
         ))
     }
 
+    fn gauge(&self, _duration: std::time::Duration) -> Option<call::Gauge> {
+        Some(call::Gauge::Edit {
+            additions: self.preview.lines.len() as u64,
+            deletions: 0,
+        })
+    }
+
     fn view(&self) -> Option<Element<'_, Never>> {
         let preview = &self.preview;
 

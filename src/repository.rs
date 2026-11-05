@@ -346,27 +346,32 @@ impl Repository {
         }
         .size(font::SMALL);
 
-        let changes = row![
-            (status.additions > 0 || status.deletions > 0).then(|| row![
-                text!("+{}", status.additions)
-                    .size(font::SMALL)
-                    .style(text::success),
-                text!("-{}", status.deletions)
-                    .size(font::SMALL)
-                    .style(text::danger),
+        let tracked_changes = status.additions > 0 || status.deletions > 0;
+        let untracked_changes = !status.untracked.is_empty();
+
+        let changes = (tracked_changes || untracked_changes).then(|| {
+            row![
+                tracked_changes.then(|| row![
+                    text!("+{}", status.additions)
+                        .size(font::SMALL)
+                        .style(text::success),
+                    text!("-{}", status.deletions)
+                        .size(font::SMALL)
+                        .style(text::danger),
+                ]
+                .spacing(5)),
+                untracked_changes.then(|| {
+                    text!("({})", status.untracked.len())
+                        .size(font::TINY)
+                        .font(Font {
+                            style: font::Style::Italic,
+                            ..Font::MONOSPACE
+                        })
+                }),
             ]
-            .spacing(5)),
-            (!status.untracked.is_empty()).then(|| {
-                text!("({})", status.untracked.len())
-                    .size(font::TINY)
-                    .font(Font {
-                        style: font::Style::Italic,
-                        ..Font::MONOSPACE
-                    })
-            }),
-        ]
-        .spacing(5)
-        .align_y(Center);
+            .spacing(5)
+            .align_y(Center)
+        });
 
         let review = button(row![branch, changes].spacing(8).align_y(Center))
             .on_press(Message::ToggleReview)

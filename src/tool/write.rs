@@ -18,6 +18,7 @@ pub struct Write {
     path: String,
     content: String,
     preview: highlight::Preview,
+    additions: u64,
 }
 
 #[derive(Deserialize)]
@@ -29,11 +30,13 @@ struct Arguments {
 impl From<Arguments> for Write {
     fn from(Arguments { path, content }: Arguments) -> Self {
         let preview = highlight::Preview::file(&path, &content);
+        let additions = content.lines().count() as u64;
 
         Self {
             path,
             content,
             preview,
+            additions,
         }
     }
 }
@@ -47,7 +50,7 @@ impl Call for Write {
 
     fn gauge(&self, _duration: std::time::Duration) -> Option<call::Gauge> {
         Some(call::Gauge::Edit {
-            additions: self.preview.lines.len() as u64,
+            additions: self.additions,
             deletions: 0,
         })
     }

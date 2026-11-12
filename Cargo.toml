@@ -31,11 +31,14 @@ tokio.features = ["fs", "process", "sync"]
 tracing-subscriber.version = "0.3"
 tracing-subscriber.features = ["tracing-log", "env-filter"]
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 nanosuit-test = { version = "0.1.0-dev", path = "./test" }
 
 tokio.version = "1"
-tokio.features = ["macros", "test-util"]
+tokio.features = ["macros", "test-util", "time"]
 
 [lints.clippy]
 large_enum_variant = "allow"

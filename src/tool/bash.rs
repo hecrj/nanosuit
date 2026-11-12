@@ -113,25 +113,17 @@ impl Call for Bash {
             let shell = shell().await?;
             let command = format!("exec 2>&1; {}", command);
 
-            let mut child = tokio::process::Command::new(shell)
-                .args(["-c", &command])
-                .current_dir(project)
-                .kill_on_drop(true)
-                .stdout(std::process::Stdio::piped())
-                .spawn()?;
-
-            let stdout = child.stdout.take().expect("stdout is piped");
+            let mut process = Process::spawn(&project, shell, &command)?;
+            let stdout = process.take_stdout().expect("stdout is piped");
             let mut lines = tokio::io::BufReader::new(stdout).lines();
-
             let mut output = Output::new();
 
             while let Some(line) = lines.next_line().await? {
                 output.push(line.clone());
-
                 sender.send(line).await;
             }
 
-            let status = child.wait().await?;
+            let status = process.wait().await?;
 
             if !status.success() {
                 output.push_notice(format!("Command failed ({status})"));
@@ -139,6 +131,101 @@ impl Call for Bash {
 
             Ok(output)
         })
+    }
+}
+
+/// The spawned shell, kept alive for the duration of the command.
+///
+/// The command's fate is bound to this handle: when it is dropped
+/// with the command still running — the tool call was aborted — the
+/// whole process group is killed, not just the shell. The shell forks
+/// the user's command as its own child, so killing only the shell
+/// (what `kill_on_drop` alone would do) orphans the command, which
+/// keeps running under init; killing the group the shell leads takes
+/// every descendant down with it.
+struct Process {
+    inner: tokio::process::Child,
+
+    /// The process group id, which the shell's own pid doubles as:
+    /// it is spawned as the leader of a new group.
+    #[cfg(unix)]
+    pgid: i32,
+
+    /// Set once the shell has exited on its own, so the drop handler
+    /// does not signal a group that is already gone — and whose id
+    /// may by then have been reused by an unrelated process.
+    finished: bool,
+}
+
+impl Process {
+    fn spawn(project: &Path, shell: &str, command: &str) -> std::io::Result<Self> {
+        let mut spawn = tokio::process::Command::new(shell);
+
+        spawn
+            .args(["-c", command])
+            .current_dir(project)
+            .stdout(std::process::Stdio::piped());
+
+        #[cfg(unix)]
+        {
+            // The shell leads a new process group, so on abort
+            // the whole command — the shell and everything it
+            // forks — can be killed as one.
+            spawn.process_group(0);
+        }
+
+        let inner = spawn.spawn()?;
+
+        #[cfg(unix)]
+        let pgid = inner.id().expect("a fresh child always has a pid") as i32;
+
+        Ok(Self {
+            inner,
+            #[cfg(unix)]
+            pgid,
+            finished: false,
+        })
+    }
+
+    fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
+        self.inner.stdout.take()
+    }
+
+    async fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
+        let status = self.inner.wait().await;
+
+        self.finished = true;
+
+        status
+    }
+}
+
+impl Drop for Process {
+    /// The tool call was dropped while the command was still
+    /// running: kill the command and everything it spawned.
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        #[cfg(unix)]
+        {
+            // SAFETY: `killpg` signals every member of process
+            // group `pgid`, which still exists here, as the command
+            // has not exited. Unlike `kill(-pgid, ..)`, a degenerate
+            // id is rejected here: `kill(0)` would signal this
+            // process's own group.
+            unsafe {
+                libc::killpg(self.pgid, libc::SIGKILL);
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Without process groups the tree cannot be signaled as
+            // a whole; killing the shell is the best available.
+            let _ = self.inner.start_kill();
+        }
     }
 }
 
@@ -426,5 +513,73 @@ mod tests {
 
         let output = run.await.expect("command ran");
         assert!(output.to_string().contains("signal: 9"));
+    }
+
+    /// Dropping the run while the command is still running kills the
+    /// whole process tree: a child the shell forked is not left
+    /// running, orphaned under init, as it was when only the shell
+    /// was killed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aborting_kills_the_whole_process_tree() {
+        use std::time::Duration;
+
+        let directory = nanosuit_test::Directory::create(".bash_abort_test")
+            .expect("a scratch directory no one else uses");
+
+        let bash = Bash::from(Arguments {
+            // The shell forks a sleeper in the background and waits
+            // for it, so the sleeper is a descendant the run must
+            // take down with the shell; its pid is handed to the test.
+            command: "sleep 30 & echo $! > sleeper.pid; wait".to_owned(),
+            title: None,
+        });
+
+        let run = bash.run(directory.as_ref());
+
+        // Drive the run the way the app does — polled continuously —
+        // so the command actually starts.
+        let task = tokio::spawn(async move {
+            let mut run = run;
+
+            while run.sip().await.is_some() {}
+
+            run.await
+        });
+
+        // Wait for the shell to fork the sleeper and hand over its pid.
+        let pid_path = directory.join("sleeper.pid");
+        let mut pid: Option<u32> = None;
+
+        for _ in 0..200 {
+            if let Ok(raw) = std::fs::read_to_string(&pid_path) {
+                pid = raw.trim().parse().ok();
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let pid = pid.expect("the shell handed over the sleeper's pid");
+
+        // The abort: the run is dropped while the command is running.
+        task.abort();
+
+        // The sleeper must be dead. It may linger as a zombie until
+        // its new parent reaps it, so poll until it is fully gone.
+        let mut gone = false;
+
+        for _ in 0..100 {
+            // SAFETY: signal 0 checks for the process's existence
+            // without delivering anything.
+            if unsafe { libc::kill(pid as i32, 0) } != 0 {
+                gone = true;
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        assert!(gone, "the sleeper {pid} survived the abort");
     }
 }

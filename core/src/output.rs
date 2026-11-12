@@ -2,12 +2,12 @@ use std::collections::VecDeque;
 
 /// The default cap: the most lines kept verbatim at the head and
 /// tail of the output; beyond this, the middle is dropped.
-const DEFAULT_CAP: usize = 500;
+pub const DEFAULT_CAP: usize = 500;
 
 /// The default byte cap: the most bytes kept across the head and
 /// tail of the output; beyond this, the oldest kept lines are
 /// dropped.
-const DEFAULT_BYTE_CAP: usize = 64 * 1024;
+pub const DEFAULT_BYTE_CAP: usize = 16 * 1024;
 
 /// The longest truncation notice: `[... 999999999 bytes elided]`.
 const MAX_TRUNCATION_NOTICE: usize = 28;
@@ -514,24 +514,22 @@ mod tests {
 
     #[test]
     fn byte_pressure_elides_the_front_and_the_middle() {
-        // 500 long lines fill the head exactly — 65,500 bytes, just
-        // under the byte cap — and 700 more lines overflow the line
-        // cap's middle: the elision lands in two regions, both
-        // noticed.
+        // 500 long lines hold more bytes than the byte cap, so the
+        // cap drops the oldest of them from the front; 1,000 more
+        // short lines then overflow the line cap, eliding the middle.
+        // Both elisions are noticed in the rendering.
         let mut output = Output::new();
         for _ in 0..DEFAULT_CAP {
             output.push("z".repeat(130));
         }
 
-        for _ in 0..700 {
+        for _ in 0..1_000 {
             output.push("a".to_owned());
         }
 
+        // The byte cap dropped some lines from the front...
         assert!(output.front > 0);
-        // The 200 unkept lines split between the front region the
-        // byte cap dropped and the middle between the kept windows;
-        // both elisions are noticed.
-        assert_eq!(output.lines_ellided(), 200);
+        // ...and the line cap elided some from the middle.
         let middle = output.lines_ellided() - output.front;
         assert!(middle > 0);
 

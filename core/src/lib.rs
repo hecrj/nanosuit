@@ -1,10 +1,10 @@
 mod environment;
-mod output;
 mod project;
 
 pub mod config;
 pub mod file;
 pub mod git;
+pub mod output;
 pub mod sandbox;
 pub mod session;
 

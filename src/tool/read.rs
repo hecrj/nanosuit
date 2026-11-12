@@ -246,6 +246,7 @@ impl Call for Read {
 #[cfg(test)]
 mod tests {
     use super::{Call, MAX_OUTPUT_BYTES, MAX_READ_BYTES, MAX_READ_LIMIT, READ_CHUNK_SIZE, Read};
+    use crate::core::output::DEFAULT_BYTE_CAP;
     use nanosuit_test::Directory;
     use std::path::Path;
 
@@ -294,37 +295,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_file_that_fits_in_a_chunk_is_read_in_full() {
-        // ~56 KiB of ordinary lines: large, but smaller than a chunk,
-        // so the whole file is returned without any truncation notice.
+    async fn a_file_that_fits_in_a_chunk_is_read_to_the_end() {
+        // 800 lines of 69 characters (70 bytes each): the whole file
+        // fits the tool's output limit, so the read reaches end of
+        // file without a read notice; the output's byte cap keeps the
+        // newest `kept` lines and elides the rest from the front.
+        let line_size = 70; // 69 'x' + the newline
+        let total = 800;
+
         let mut contents = String::new();
 
-        for _ in 0..800 {
-            contents.push_str(&"x".repeat(69));
+        for _ in 0..total {
+            contents.push_str(&"x".repeat(line_size - 1));
             contents.push('\n');
         }
 
         let root = project("fits", &[("fitting.txt", &contents)]);
         let output = read("fitting.txt", &root).await;
 
-        assert_eq!(output, contents.trim_end_matches('\n'));
+        let kept = DEFAULT_BYTE_CAP / line_size;
+        let front = total - kept;
+
+        assert!(output.starts_with(&format!("[... {front} lines elided]\n")));
+        assert!(output.ends_with(&"x".repeat(line_size - 1)));
+        // The front notice, then the kept lines.
+        assert_eq!(output.lines().count(), 1 + kept);
     }
 
     #[tokio::test]
-    async fn a_file_of_exactly_one_chunk_is_read_in_full() {
-        // The file ends exactly at the chunk boundary, so the peek that
-        // disambiguates the byte limit must see end of file.
+    async fn a_file_of_exactly_one_chunk_is_read_to_the_end() {
+        // The file is exactly the tool's output limit
+        // (`READ_CHUNK_SIZE` bytes): every line is emitted, the read
+        // reaches end of file, and the byte cap keeps the newest
+        // `kept` lines.
+        let line_size = 128; // 127 'y' + the newline
+        let total = READ_CHUNK_SIZE / line_size; // exactly one chunk
+
         let mut contents = String::new();
 
-        for _ in 0..(READ_CHUNK_SIZE / 128) {
-            contents.push_str(&"y".repeat(127));
+        for _ in 0..total {
+            contents.push_str(&"y".repeat(line_size - 1));
             contents.push('\n');
         }
 
         let root = project("exact", &[("exact.txt", &contents)]);
         let output = read("exact.txt", &root).await;
 
-        assert_eq!(output, contents.trim_end_matches('\n'));
+        let kept = DEFAULT_BYTE_CAP / line_size;
+        let front = total - kept;
+
+        assert!(output.starts_with(&format!("[... {front} lines elided]\n")));
+        assert!(output.ends_with(&"y".repeat(line_size - 1)));
+        // The front notice, then the kept lines.
+        assert_eq!(output.lines().count(), 1 + kept);
     }
 
     #[tokio::test]
@@ -373,51 +396,74 @@ mod tests {
 
     #[tokio::test]
     async fn the_output_limit_caps_long_lines() {
-        // 900 lines of 100 bytes: emitting 656 of them would push the
-        // output past the limit, so the read stops at 655 lines.
+        // 900 lines of 99 characters (100 bytes each): the tool stops
+        // emitting once the next line would pass its own limit, and
+        // the byte cap keeps the newest `kept` of the emitted lines;
+        // the notice, exempt from the cap, reports the stop.
+        let line_size = 100; // 99 'x' + the newline
+        let total = 900;
+
         let mut contents = String::new();
 
-        for _ in 0..900 {
-            contents.push_str(&"x".repeat(99));
+        for _ in 0..total {
+            contents.push_str(&"x".repeat(line_size - 1));
             contents.push('\n');
         }
 
         let root = project("output-limit", &[("long.txt", &contents)]);
         let output = read("long.txt", &root).await;
 
+        // The tool emits lines until the next would pass its limit.
+        let emitted = (MAX_OUTPUT_BYTES / (line_size as u64)) as usize;
+        let kept = DEFAULT_BYTE_CAP / line_size;
+        let front = emitted - kept;
+
         let notice = format!(
-            "[Read stopped after 65500 bytes of output \
+            "[Read stopped after {} bytes of output \
             (limit {MAX_OUTPUT_BYTES}); continue reading with \
-            offset=656, or inspect the file with bash]"
+            offset={}, or inspect the file with bash]",
+            emitted * line_size,
+            emitted + 1
         );
 
+        assert!(output.starts_with(&format!("[... {front} lines elided]\n")));
         assert!(output.ends_with(&notice));
-        // 655 lines of 99 characters, joined by newlines, plus the
-        // newline before the notice.
-        assert_eq!(output.len(), 655 * 100 + notice.len());
+        // The front notice, the kept lines, and the trailing notice.
+        assert_eq!(output.lines().count(), 2 + kept);
     }
 
     #[tokio::test]
     async fn a_deep_offset_reads_past_the_output_limit() {
-        // 1200 lines of 100 bytes: reaching line 700 requires scanning
-        // past the output limit, which the larger scan budget allows.
+        // 1200 lines of 99 characters (100 bytes each): reaching line
+        // 700 requires scanning past the output limit, which the
+        // larger scan budget allows; the 501 remaining lines are all
+        // emitted, and the byte cap keeps the newest `kept`.
+        let line_size = 100; // 9-char label + 90 'x' + the newline
+        let offset = 700u64;
+        let total = 1200;
+
         let mut contents = String::new();
 
-        for line in 1..=1200 {
+        for line in 1..=total {
             contents.push_str(&format!("line-{:04}", line));
-            contents.push_str(&"x".repeat(90));
+            contents.push_str(&"x".repeat(line_size - 1 - 9));
             contents.push('\n');
         }
 
         let root = project("deep-offset", &[("deep.txt", &contents)]);
-        let output = read_at("deep.txt", &root, Some(700), None).await;
+        let output = read_at("deep.txt", &root, Some(offset), None).await;
 
-        // Lines 700 through 1200 are returned in full, with no notice.
-        assert!(output.starts_with("line-0700"));
-        assert!(output.ends_with(&"x".repeat(90)));
-        assert!(!output.contains('['));
-        // 501 lines of 99 characters, no trailing newline.
-        assert_eq!(output.len(), 501 * 99 + 500);
+        let emitted = total - offset as usize + 1; // lines `offset`..=total
+        let kept = DEFAULT_BYTE_CAP / line_size;
+        let front = emitted - kept;
+
+        // The read reached end of file: no read notice, and the front
+        // elision plus the kept lines account for every line emitted.
+        assert!(output.starts_with(&format!("[... {front} lines elided]\n")));
+        assert!(output.ends_with(&format!("line-{total:04}{}", "x".repeat(line_size - 1 - 9))));
+        assert!(!output.contains("Read stopped"));
+        // The front notice, then the kept lines.
+        assert_eq!(output.lines().count(), 1 + kept);
     }
 
     #[tokio::test]
@@ -481,15 +527,19 @@ mod tests {
 
     #[tokio::test]
     async fn line_limit_advises_a_continuation_offset() {
-        let contents: String = (1..=1500).map(|line| format!("line {line}\n")).collect();
+        // 1,500 short lines: the read stops at the default line limit
+        // (1,000) and advises the continuation offset. The lines are
+        // kept short so the 1,000 emitted stay within the byte cap
+        // and nothing is elided.
+        let contents: String = (1..=1500).map(|line| format!("{line}\n")).collect();
 
         let root = project("line-limit", &[("many.txt", &contents)]);
         let output = read("many.txt", &root).await;
 
-        assert!(output.starts_with("line 1\n"));
-        assert!(output.contains("line 1000\n"));
-        // 1,001 lines at the default limit fit the raised cap, so no
-        // middle lines are elided.
+        assert!(output.starts_with("1\n"));
+        assert!(output.contains("1000\n"));
+        // The 1,000 emitted lines stay within the byte cap, so no
+        // lines are elided.
         assert!(!output.contains("elided"));
         assert!(output.ends_with("[File has more lines; continue reading with offset=1001]"));
     }
@@ -556,15 +606,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_max_limit_read_is_kept_in_full() {
-        // A read at the max limit may return `MAX_READ_LIMIT` lines;
-        // the output's cap is raised to match, so no middle lines are
-        // dropped.
-        let contents = "a\n".repeat(MAX_READ_LIMIT as usize);
+    async fn a_max_limit_read_has_no_middle_elision() {
+        // A read at the max limit returns `MAX_READ_LIMIT` lines; the
+        // output's line cap is raised to match, so no middle lines
+        // are elided — the byte cap alone trims the front to the
+        // newest `kept` lines. The lines are sized so the full read
+        // exceeds the byte cap yet fits the read's own output limit.
+        let line_size = 6; // 5 'a' + the newline
+        let total = MAX_READ_LIMIT as usize;
+
+        let contents = format!("{}\n", "a".repeat(line_size - 1)).repeat(total);
 
         let root = project("max-limit", &[("max.txt", &contents)]);
         let output = read_at("max.txt", &root, None, Some(MAX_READ_LIMIT)).await;
 
-        assert_eq!(output, contents.trim_end_matches('\n'));
+        let kept = DEFAULT_BYTE_CAP / line_size;
+        let front = total - kept;
+
+        assert!(output.starts_with(&format!("[... {front} lines elided]\n")));
+        assert!(output.ends_with('a'));
+        // One elision notice only: the front the byte cap dropped.
+        // The line cap, raised to `MAX_READ_LIMIT`, elides no
+        // middle lines.
+        assert_eq!(output.matches("[...").count(), 1);
+        // The front notice, then the kept lines.
+        assert_eq!(output.lines().count(), 1 + kept);
     }
 }

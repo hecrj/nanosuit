@@ -88,6 +88,10 @@ impl Call for Write {
             let path = project.join(&path);
             let _lock = file::lock(&path).await;
 
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+
             tokio::fs::write(&path, content).await?;
 
             let mut output = Output::new();
